@@ -92,7 +92,7 @@ def compute_gex_profile(
         if not call_row.empty:
             iv = float(call_row['impliedVolatility'].iloc[0])
             oi = float(call_row['openInterest'].iloc[0])
-            if iv > 0 and oi > 0:
+            if iv > 0.05 and oi > 0:  # require at least 5% IV
                 g = _bs_gamma(spot, strike, T, r, iv)
                 call_gex = g * oi * 100 * spot
 
@@ -100,7 +100,7 @@ def compute_gex_profile(
         if not put_row.empty:
             iv = float(put_row['impliedVolatility'].iloc[0])
             oi = float(put_row['openInterest'].iloc[0])
-            if iv > 0 and oi > 0:
+            if iv > 0.05 and oi > 0:  # require at least 5% IV
                 g = _bs_gamma(spot, strike, T, r, iv)
                 put_gex = -g * oi * 100 * spot
 
@@ -121,20 +121,31 @@ def compute_options_walls(
     top_n: int = 10,
 ) -> dict:
     """
-    Identify high open interest strikes as support/resistance walls.
+    Identify high-activity strikes as support/resistance walls.
 
-    Call walls (resistance): highest call OI strikes above spot.
-    Put walls (support): highest put OI strikes below spot.
+    Uses openInterest when available, falls back to volume.
+    Call walls (resistance): highest activity strikes above spot.
+    Put walls (support): highest activity strikes below spot.
     """
+    col = _pick_activity_col(pd.concat([calls, puts], ignore_index=True))
+
     # Call walls — above spot
-    above = calls[calls['strike'] >= spot].nlargest(top_n, 'openInterest')
-    call_walls = [(float(r['strike']), int(r['openInterest']))
-                  for _, r in above.iterrows() if r['openInterest'] > 0]
+    above = calls[calls['strike'] >= spot]
+    if col in above.columns and above[col].sum() > 0:
+        above = above.nlargest(top_n, col)
+        call_walls = [(float(r['strike']), int(r[col]))
+                      for _, r in above.iterrows() if r[col] > 0]
+    else:
+        call_walls = []
 
     # Put walls — below spot
-    below = puts[puts['strike'] <= spot].nlargest(top_n, 'openInterest')
-    put_walls = [(float(r['strike']), int(r['openInterest']))
-                 for _, r in below.iterrows() if r['openInterest'] > 0]
+    below = puts[puts['strike'] <= spot]
+    if col in below.columns and below[col].sum() > 0:
+        below = below.nlargest(top_n, col)
+        put_walls = [(float(r['strike']), int(r[col]))
+                     for _, r in below.iterrows() if r[col] > 0]
+    else:
+        put_walls = []
 
     strongest_call = call_walls[0][0] if call_walls else spot * 1.05
     strongest_put = put_walls[0][0] if put_walls else spot * 0.95
@@ -144,35 +155,61 @@ def compute_options_walls(
         'put_walls': sorted(put_walls, key=lambda x: x[0]),
         'strongest_call_wall': strongest_call,
         'strongest_put_wall': strongest_put,
+        'activity_source': col,
     }
+
+
+def _pick_activity_col(df: pd.DataFrame) -> str:
+    """Pick 'openInterest' if it has data, otherwise fall back to 'volume'."""
+    if 'openInterest' in df.columns and df['openInterest'].sum() > 0:
+        return 'openInterest'
+    if 'volume' in df.columns and df['volume'].sum() > 0:
+        return 'volume'
+    return 'openInterest'
 
 
 def compute_max_pain(
     calls: pd.DataFrame,
     puts: pd.DataFrame,
+    spot: float = 0.0,
 ) -> float:
     """
     Max pain: the strike where total options expire with minimum value.
 
-    For each candidate strike K:
-      call_pain = sum of max(0, K - strike_c) * OI_c for all calls
-      put_pain  = sum of max(0, strike_p - K) * OI_p for all puts
+    Uses openInterest when available, falls back to volume.
+    Returns spot price if no activity data is available.
     """
-    all_strikes = sorted(set(calls['strike'].tolist() + puts['strike'].tolist()))
+    col = _pick_activity_col(pd.concat([calls, puts], ignore_index=True))
+
+    calls_active = calls[calls[col] > 0] if col in calls.columns else calls
+    puts_active = puts[puts[col] > 0] if col in puts.columns else puts
+
+    total_activity = (calls_active[col].sum() if not calls_active.empty else 0) + \
+                     (puts_active[col].sum() if not puts_active.empty else 0)
+
+    if total_activity == 0:
+        return spot if spot > 0 else 0.0
+
+    # Only consider strikes near spot (±15%) for efficiency and relevance
+    lo, hi = spot * 0.85, spot * 1.15
+    calls_near = calls_active[(calls_active['strike'] >= lo) & (calls_active['strike'] <= hi)]
+    puts_near = puts_active[(puts_active['strike'] >= lo) & (puts_active['strike'] <= hi)]
+
+    all_strikes = sorted(set(calls_near['strike'].tolist() + puts_near['strike'].tolist()))
     if not all_strikes:
-        return 0.0
+        return spot if spot > 0 else 0.0
 
     min_pain = float('inf')
     max_pain_strike = all_strikes[len(all_strikes) // 2]
 
     for K in all_strikes:
         call_pain = sum(
-            max(0, K - row['strike']) * row['openInterest']
-            for _, row in calls.iterrows()
+            max(0, K - row['strike']) * row[col]
+            for _, row in calls_near.iterrows()
         )
         put_pain = sum(
-            max(0, row['strike'] - K) * row['openInterest']
-            for _, row in puts.iterrows()
+            max(0, row['strike'] - K) * row[col]
+            for _, row in puts_near.iterrows()
         )
         total = call_pain + put_pain
         if total < min_pain:
@@ -187,12 +224,15 @@ def compute_iv_expected_move(
     puts: pd.DataFrame,
     spot: float,
     expiry_str: str,
+    vix_fallback: float = None,
 ) -> dict:
     """
     IV-based expected price range using ATM straddle implied volatility.
 
     1-sigma range (~68%): spot +/- (spot * IV * sqrt(T))
     2-sigma range (~95%): spot +/- 2 * (spot * IV * sqrt(T))
+
+    Falls back to VIX/100 as IV proxy when option IVs are unavailable.
     """
     today = date.today()
     try:
@@ -206,14 +246,24 @@ def compute_iv_expected_move(
     atm_call = calls.iloc[(calls['strike'] - spot).abs().argsort()[:3]]
     atm_put = puts.iloc[(puts['strike'] - spot).abs().argsort()[:3]]
 
-    # Average ATM IV
+    # Average ATM IV (filter out junk values — require at least 5% annualized IV)
     ivs = []
     for df_atm in [atm_call, atm_put]:
         for _, row in df_atm.iterrows():
             iv = row.get('impliedVolatility', 0)
-            if iv and iv > 0:
+            if iv and iv > 0.05:  # require at least 5% IV
                 ivs.append(iv)
-    atm_iv = np.mean(ivs) if ivs else 0.20
+
+    iv_source = 'options'
+    if ivs:
+        atm_iv = np.mean(ivs)
+    elif vix_fallback and vix_fallback > 0:
+        # VIX represents annualized 1-sigma expected move of S&P 500 in %
+        atm_iv = vix_fallback / 100.0
+        iv_source = 'VIX'
+    else:
+        atm_iv = 0.20
+        iv_source = 'default'
 
     # Expected move to expiry
     move_1s = spot * atm_iv * math.sqrt(T)
@@ -224,6 +274,7 @@ def compute_iv_expected_move(
 
     return {
         'iv_used': round(atm_iv, 4),
+        'iv_source': iv_source,
         'days_to_expiry': dte,
         'expected_move_1sigma': round(move_1s, 2),
         'expected_move_2sigma': round(move_2s, 2),
@@ -241,14 +292,17 @@ def compute_put_call_ratios(
     calls: pd.DataFrame,
     puts: pd.DataFrame,
 ) -> dict:
-    """Put/Call ratios for OI and volume."""
-    call_oi = calls['openInterest'].sum()
-    put_oi = puts['openInterest'].sum()
-    call_vol = calls['volume'].sum()
-    put_vol = puts['volume'].sum()
+    """Put/Call ratios for OI and volume. Uses volume as primary when OI is unavailable."""
+    call_oi = calls['openInterest'].sum() if 'openInterest' in calls.columns else 0
+    put_oi = puts['openInterest'].sum() if 'openInterest' in puts.columns else 0
+    call_vol = calls['volume'].sum() if 'volume' in calls.columns else 0
+    put_vol = puts['volume'].sum() if 'volume' in puts.columns else 0
 
     pc_oi = put_oi / call_oi if call_oi > 0 else 1.0
     pc_vol = put_vol / call_vol if call_vol > 0 else 1.0
+
+    # Use volume ratio as primary bias when OI is unreliable
+    has_oi = (call_oi + put_oi) > 100
 
     def _bias(ratio):
         if ratio < 0.7:
@@ -257,6 +311,8 @@ def compute_put_call_ratios(
             return 'bearish'
         return 'neutral'
 
+    primary_bias = _bias(pc_oi) if has_oi else _bias(pc_vol)
+
     return {
         'pc_ratio_oi': round(pc_oi, 3),
         'pc_ratio_volume': round(pc_vol, 3),
@@ -264,7 +320,7 @@ def compute_put_call_ratios(
         'put_oi_total': int(put_oi),
         'call_volume_total': int(call_vol),
         'put_volume_total': int(put_vol),
-        'oi_bias': _bias(pc_oi),
+        'oi_bias': primary_bias,
         'volume_bias': _bias(pc_vol),
     }
 
@@ -395,7 +451,7 @@ def compute_composite_analysis(
     Master analysis function. Runs all sub-analyses and produces
     the composite result for the dashboard.
     """
-    # 1. Fetch options chain first (to know if proxy is used)
+    # 1. Fetch options chain — skip expiries with no usable OI/IV data
     calls, puts, meta = fetch_options_chain(ticker, expiry)
     if calls.empty:
         return {'error': f'No options data for {ticker}'}
@@ -406,6 +462,24 @@ def compute_composite_analysis(
     price_ratio = meta.get('price_ratio', 1.0)
     expiry_used = meta['expiry']
 
+    # Check if this expiry has usable activity data (OI or volume)
+    _MIN_ACTIVITY = 1000
+    total_oi = calls['openInterest'].sum() + puts['openInterest'].sum()
+    total_vol = calls['volume'].sum() + puts['volume'].sum()
+    if total_oi < _MIN_ACTIVITY and total_vol < _MIN_ACTIVITY:
+        # Try next expiries until we find one with meaningful activity
+        all_expiries = fetch_expiration_dates(ticker)
+        for alt_exp in all_expiries[1:10]:
+            alt_calls, alt_puts, alt_meta = fetch_options_chain(ticker, alt_exp)
+            if alt_calls.empty:
+                continue
+            alt_oi = alt_calls['openInterest'].sum() + alt_puts['openInterest'].sum()
+            alt_vol = alt_calls['volume'].sum() + alt_puts['volume'].sum()
+            if alt_oi >= _MIN_ACTIVITY or alt_vol >= _MIN_ACTIVITY:
+                calls, puts, meta = alt_calls, alt_puts, alt_meta
+                expiry_used = alt_meta['expiry']
+                break
+
     # 2. Fetch price data — use proxy ticker so prices match options chain
     price_ticker = resolved if proxy_used else ticker
     df = fetch_stock_data(price_ticker, period='1y')
@@ -413,6 +487,15 @@ def compute_composite_analysis(
         return {'error': f'No price data for {ticker}'}
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
+
+    # 2b. Fetch VIX for IV fallback
+    vix_value = None
+    try:
+        vix_df = fetch_stock_data('^VIX', period='5d')
+        if not vix_df.empty:
+            vix_value = float(vix_df['Close'].iloc[-1])
+    except Exception:
+        pass
 
     # 3. Fractal indicators on price data
     df = add_williams_fractals(df)
@@ -425,8 +508,8 @@ def compute_composite_analysis(
     # 4. Options analytics
     gex_df = compute_gex_profile(calls, puts, spot, expiry_used)
     walls = compute_options_walls(calls, puts, spot)
-    max_pain_strike = compute_max_pain(calls, puts)
-    iv_range = compute_iv_expected_move(calls, puts, spot, expiry_used)
+    max_pain_strike = compute_max_pain(calls, puts, spot)
+    iv_range = compute_iv_expected_move(calls, puts, spot, expiry_used, vix_fallback=vix_value)
     pc_ratios = compute_put_call_ratios(calls, puts)
     skew = compute_iv_skew(calls, puts, spot)
 
