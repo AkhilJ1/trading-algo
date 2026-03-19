@@ -57,7 +57,7 @@ st.sidebar.caption(f"Strategy: RSI<{RSI_OVERSOLD} + BB wick | MA({MA_SHORT}/{MA_
 # ---------------------------------------------------------------------------
 # Cached data loaders
 # ---------------------------------------------------------------------------
-@st.cache(ttl=3600, allow_output_mutation=True, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_full_data(ticker: str) -> pd.DataFrame:
     """Fetch 5Y of OHLCV + all indicators. Cached 1 hour."""
     df = fetch_stock_data(ticker, period='5y')
