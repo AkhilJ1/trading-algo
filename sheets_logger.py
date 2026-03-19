@@ -6,7 +6,7 @@ Falls back to local CSV if Sheets is unavailable.
 """
 
 import os
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 
@@ -23,7 +23,7 @@ SCOPES = [
 ]
 
 PREDICTION_HEADERS = [
-    "date", "ticker", "spot_price", "floor", "ceiling",
+    "date", "timestamp", "ticker", "spot_price", "floor", "ceiling",
     "bias", "confidence", "expiry", "vix", "gex_net", "regime",
 ]
 WEIGHT_HEADERS = [
@@ -110,8 +110,9 @@ def log_prediction(
     try:
         ss = get_spreadsheet()
         ws = _ensure_sheet(ss, GSHEET_PREDICTIONS_SHEET, PREDICTION_HEADERS)
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         row = [
-            date_str, ticker, round(spot_price, 2),
+            date_str, now, ticker, round(spot_price, 2),
             round(floor, 2), round(ceiling, 2),
             bias, round(confidence, 1), expiry,
             round(vix, 2) if vix is not None else "",
@@ -142,7 +143,7 @@ def log_weight_change(weight_name, old_value, new_value, reason) -> bool:
 
 
 def read_predictions() -> pd.DataFrame:
-    """Read all predictions from the sheet into a DataFrame."""
+    """Read all predictions from the sheet. Deduplicates to latest per ticker per day."""
     try:
         ss = get_spreadsheet()
         ws = _ensure_sheet(ss, GSHEET_PREDICTIONS_SHEET, PREDICTION_HEADERS)
@@ -151,9 +152,16 @@ def read_predictions() -> pd.DataFrame:
             return pd.DataFrame(columns=PREDICTION_HEADERS)
         df = pd.DataFrame(data)
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         for col in ["spot_price", "floor", "ceiling", "confidence", "vix", "gex_net"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+        # Keep only the latest prediction per ticker per day
+        if "timestamp" in df.columns and not df["timestamp"].isna().all():
+            df = df.sort_values("timestamp").drop_duplicates(
+                subset=["date", "ticker"], keep="last"
+            ).reset_index(drop=True)
         return df
     except Exception as e:
         print(f"[sheets_logger] Error reading predictions: {e}")
@@ -211,13 +219,14 @@ def log_prediction_csv(
     pred_file = os.path.join(os.path.dirname(__file__), 'data', 'predictions.csv')
     os.makedirs(os.path.dirname(pred_file), exist_ok=True)
     write_header = not os.path.exists(pred_file)
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     try:
         with open(pred_file, 'a', newline='') as f:
             writer = csv.writer(f)
             if write_header:
                 writer.writerow(PREDICTION_HEADERS)
             writer.writerow([
-                date_str, ticker, round(spot_price, 2),
+                date_str, now, ticker, round(spot_price, 2),
                 round(floor, 2), round(ceiling, 2),
                 bias, round(confidence, 1), expiry,
                 round(vix, 2) if vix is not None else "",
