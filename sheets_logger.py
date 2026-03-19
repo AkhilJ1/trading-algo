@@ -82,10 +82,14 @@ def get_spreadsheet():
 
 
 def _ensure_sheet(spreadsheet, title, headers):
-    """Get or create a worksheet with the given headers."""
+    """Get or create a worksheet with the given headers. Updates headers if they changed."""
     import gspread
     try:
         ws = spreadsheet.worksheet(title)
+        # Check if headers match; update row 1 if schema changed
+        existing = ws.row_values(1)
+        if existing != headers:
+            ws.update("A1", [headers], value_input_option="RAW")
     except gspread.exceptions.WorksheetNotFound:
         ws = spreadsheet.add_worksheet(title=title, rows=1000, cols=len(headers))
         ws.append_row(headers, value_input_option="RAW")
