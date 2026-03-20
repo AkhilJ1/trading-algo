@@ -924,18 +924,25 @@ elif page == '📊 Stock Chart':
                 line=dict(color=avwap_colors[i % len(avwap_colors)], width=1, dash='dashdot'),
             ), row=1, col=1)
 
-    # Volume Profile (horizontal bars)
+    # Volume Profile (horizontal bars via shapes — avoids xaxis conflict with subplots)
     if show_vol_profile:
         vp = compute_volume_profile(df_display)
         if vp['volumes']:
             max_vol = max(vp['volumes']) if max(vp['volumes']) > 0 else 1
-            # Scale bar widths to ~20% of the price chart x-range
-            fig.add_trace(go.Bar(
-                y=vp['bin_centers'], x=[v / max_vol * 0.3 for v in vp['volumes']],
-                orientation='h', name='Volume Profile', opacity=0.15,
-                marker_color='#42a5f5', showlegend=False,
-                xaxis='x2',
-            ), row=1, col=1)
+            for i_vp, (center, vol) in enumerate(zip(vp['bin_centers'], vp['volumes'])):
+                if vol <= 0:
+                    continue
+                bar_width = (vp['bin_centers'][1] - vp['bin_centers'][0]) * 0.8 if len(vp['bin_centers']) > 1 else 1
+                bar_length = vol / max_vol * 0.20  # 20% of chart width (paper coords)
+                fig.add_shape(
+                    type='rect',
+                    xref='paper', yref='y',
+                    x0=1.0 - bar_length, x1=1.0,
+                    y0=center - bar_width / 2, y1=center + bar_width / 2,
+                    fillcolor='rgba(66,165,245,0.15)',
+                    line=dict(width=0),
+                    row=1, col=1,
+                )
             # POC line
             fig.add_hline(y=vp['poc'], line=dict(color='#42a5f5', width=1, dash='dot'),
                           annotation_text=f"POC ${vp['poc']:.0f}", annotation_position='right', row=1, col=1)
