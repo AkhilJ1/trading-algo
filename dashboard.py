@@ -879,8 +879,23 @@ elif page == '🔬 Fractal & Options':
     # SECTION A: Bias Banner + Key Metrics
     # ══════════════════════════════════════════════════════════════════════
     proxy_note = f"  (via {result['resolved_ticker']} options)" if result['proxy_used'] else ""
-    st.markdown(f"### {result['ticker']}{proxy_note}  —  ${result['spot_price']:.2f}")
-    st.caption(f"Expiry: {result['expiry']}  |  {result['timestamp']}")
+
+    # Fetch live/latest price on every refresh (falls back to last analysis price)
+    _live_price = result['spot_price']
+    try:
+        import yfinance as yf
+        _hist = yf.Ticker(result['ticker']).history(period='2d')
+        if not _hist.empty:
+            _live_price = float(_hist['Close'].iloc[-1])
+    except Exception:
+        pass
+
+    st.markdown(f"### {result['ticker']}{proxy_note}  —  ${_live_price:.2f}")
+    _price_delta = _live_price - result['spot_price']
+    _analysis_note = f"Expiry: {result['expiry']}  |  Analyzed: {result['timestamp']}"
+    if abs(_price_delta) > 0.005:
+        _analysis_note += f"  |  Since analysis: {'+' if _price_delta > 0 else ''}{_price_delta:.2f}"
+    st.caption(_analysis_note)
 
     bias = result['bias']
     conf = result['confidence']

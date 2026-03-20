@@ -39,6 +39,29 @@ def fetch_expiration_dates(ticker: str) -> List[str]:
         return []
 
 
+def _load_latest_cache(resolved: str, original: str, proxy_used: bool):
+    """Find and load the most recent cached options data for a ticker."""
+    import glob
+    safe = resolved.replace('=', '_').replace('/', '_')
+    pattern = os.path.join(CACHE_DIR, f"opts_{safe}_*.json")
+    files = sorted(glob.glob(pattern), reverse=True)
+    for f in files:
+        try:
+            with open(f, 'r') as fh:
+                cached = json.load(fh)
+            calls = pd.DataFrame(cached['calls'])
+            puts = pd.DataFrame(cached['puts'])
+            if calls.empty:
+                continue
+            meta = cached['meta']
+            meta['original_ticker'] = original
+            meta['proxy_used'] = proxy_used
+            return calls, puts, meta
+        except Exception:
+            continue
+    return None
+
+
 def fetch_options_chain(
     ticker: str,
     expiry: Optional[str] = None,
@@ -59,13 +82,19 @@ def fetch_options_chain(
         available = list(t.options)
     except Exception:
         pass
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
     if not available:
+        # After hours: try to load most recent cached data for this ticker
+        cached_result = _load_latest_cache(resolved, ticker.upper(), proxy_used)
+        if cached_result is not None:
+            return cached_result
         return pd.DataFrame(), pd.DataFrame(), {}
 
     if expiry is None or expiry not in available:
         expiry = available[0]
 
-    os.makedirs(CACHE_DIR, exist_ok=True)
     cache_file = _cache_path(resolved, expiry)
 
     if use_cache and os.path.exists(cache_file):
@@ -79,9 +108,16 @@ def fetch_options_chain(
         meta['proxy_used'] = proxy_used
         return calls, puts, meta
 
-    chain = t.option_chain(expiry)
-    calls = chain.calls.copy()
-    puts = chain.puts.copy()
+    try:
+        chain = t.option_chain(expiry)
+        calls = chain.calls.copy()
+        puts = chain.puts.copy()
+    except Exception:
+        # Fetch failed — try cached data
+        cached_result = _load_latest_cache(resolved, ticker.upper(), proxy_used)
+        if cached_result is not None:
+            return cached_result
+        return pd.DataFrame(), pd.DataFrame(), {}
 
     # Fill NaN in volume/OI with 0
     for col in ('volume', 'openInterest'):
