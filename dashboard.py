@@ -896,14 +896,50 @@ elif page == '🔬 Fractal & Options':
         st.warning(banner)
 
     # Key metrics row
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric('Floor (Support)', f"${floor_val:.2f}")
-    k2.metric('Ceiling (Resistance)', f"${ceil_val:.2f}")
-    k3.metric('Max Pain', f"${result['max_pain']:.2f}")
-    k4.metric('Market Regime', result['market_regime'].title())
-    k5.metric('Fractal Dimension', f"{result['fractal_dimension']:.3f}")
     iv_range = result['iv_range']
-    k6.metric('ATM IV', f"{iv_range.get('iv_used', 0)*100:.1f}%")
+    vrp = result.get('vrp', {})
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric('Floor (1-sigma)', f"${floor_val:.2f}")
+    k2.metric('Ceiling (1-sigma)', f"${ceil_val:.2f}")
+    k3.metric('ATM IV', f"{iv_range.get('iv_used', 0)*100:.1f}%")
+    k4.metric('Parkinson RV', f"{vrp.get('rv_parkinson', 0)*100:.1f}%" if vrp.get('rv_parkinson') else 'N/A')
+    k5.metric('VRP Adj', f"IV overstates {vrp.get('vrp_pct', 0):.0f}%")
+    k6.metric('Market Regime', result['market_regime'].title())
+
+    # Iron Condor Range Levels
+    ranges = result.get('ranges', {})
+    if ranges:
+        st.subheader('Iron Condor Range Levels')
+        st.caption('Choose your confidence level for short strikes')
+        rc1, rc2, rc3 = st.columns(3)
+        r_ratio = result.get('price_ratio', 1.0) if result['proxy_used'] else 1.0
+        for col, (key, label) in zip(
+            [rc1, rc2, rc3],
+            [('1sigma', '1-Sigma (~68%)'), ('1_5sigma', '1.5-Sigma (~87%)'), ('2sigma', '2-Sigma (~95%)')],
+        ):
+            r = ranges.get(key, {})
+            with col:
+                st.metric(
+                    label,
+                    f"${r.get('floor', 0):.2f} — ${r.get('ceiling', 0):.2f}",
+                    delta=f"± ${r.get('move', 0):.2f}",
+                    delta_color='off',
+                )
+
+    # Methodology transparency
+    meth = result.get('range_methodology', {})
+    vix_ts = result.get('vix_term_structure', {})
+    with st.expander('Range Methodology (how floor/ceiling is computed)'):
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric('Base Move (raw IV)', f"± ${meth.get('base_move', 0):.2f}")
+        m2.metric('VRP Factor', f"{meth.get('vrp_factor', 0):.3f}")
+        m3.metric('Regime Scale', f"{meth.get('total_regime', 0):.3f}")
+        m4.metric('Final 1σ Move', f"± ${meth.get('final_move', 0):.2f}")
+        st.caption(
+            f"VIX Term Structure: {vix_ts.get('structure', 'unknown').title()} "
+            f"(VIX={vix_ts.get('vix_spot', 'N/A')}, VIX3M={vix_ts.get('vix_3m', 'N/A')}) | "
+            f"Max Pain (info only): ${result['max_pain']:.2f}"
+        )
 
     # VIX regime + Ensemble consensus row
     try:
@@ -991,27 +1027,15 @@ elif page == '🔬 Fractal & Options':
     st.markdown('---')
 
     # ══════════════════════════════════════════════════════════════════════
-    # SECTION B: IV Expected Range
+    # SECTION B: Variance Risk Premium Analysis
     # ══════════════════════════════════════════════════════════════════════
-    st.subheader('IV-Based Expected Range')
-    r_ratio = result.get('price_ratio', 1.0) if result['proxy_used'] else 1.0
-    r1, r2 = st.columns(2)
-    with r1:
-        st.markdown('**Daily Range (1-sigma, ~68% probability)**')
-        dl = iv_range.get('daily_range_low', 0) * r_ratio
-        dh = iv_range.get('daily_range_high', 0) * r_ratio
-        dm = iv_range.get('daily_expected_move', 0) * r_ratio
-        st.markdown(f"${dl:.2f}  —  ${dh:.2f}")
-        st.caption(f"Expected move: +/- ${dm:.2f}")
-    with r2:
-        dte = iv_range.get('days_to_expiry', 0)
-        st.markdown(f"**Range to Expiry ({dte}d)**")
-        l1 = iv_range.get('range_low_1sigma', 0) * r_ratio
-        h1 = iv_range.get('range_high_1sigma', 0) * r_ratio
-        l2 = iv_range.get('range_low_2sigma', 0) * r_ratio
-        h2 = iv_range.get('range_high_2sigma', 0) * r_ratio
-        st.markdown(f"1-sigma (~68%): ${l1:.2f} — ${h1:.2f}")
-        st.markdown(f"2-sigma (~95%): ${l2:.2f} — ${h2:.2f}")
+    st.subheader('Variance Risk Premium Analysis')
+    st.caption('IV systematically overstates realized vol — this is the #1 edge for iron condor sellers')
+    vp1, vp2, vp3, vp4 = st.columns(4)
+    vp1.metric('Raw ATM IV', f"{vrp.get('iv', 0)*100:.1f}%")
+    vp2.metric('Parkinson RV (20d)', f"{vrp.get('rv_parkinson', 0)*100:.1f}%" if vrp.get('rv_parkinson') else 'N/A')
+    vp3.metric('VRP Ratio (RV/IV)', f"{vrp.get('scaling_factor', 0):.3f}")
+    vp4.metric('IV Overstatement', f"{vrp.get('vrp_pct', 0):.1f}%")
 
     st.markdown('---')
 
@@ -1055,19 +1079,30 @@ elif page == '🔬 Fractal & Options':
             marker=dict(symbol='triangle-up', color='#26a69a', size=10),
         ), row=1, col=1)
 
-    # Floor / Ceiling lines (in proxy price space)
+    # Floor / Ceiling lines at multiple sigma levels
     proxy_floor = floor_val / r_ratio if r_ratio > 1 else floor_val
     proxy_ceil = ceil_val / r_ratio if r_ratio > 1 else ceil_val
     fig_frac.add_hline(y=proxy_floor, line=dict(color='#26a69a', width=2, dash='dash'),
-                       row=1, col=1, annotation_text=f"Floor ${floor_val:.2f}",
+                       row=1, col=1, annotation_text=f"1σ Floor ${floor_val:.2f}",
                        annotation_position='right')
     fig_frac.add_hline(y=proxy_ceil, line=dict(color='#ef5350', width=2, dash='dash'),
-                       row=1, col=1, annotation_text=f"Ceiling ${ceil_val:.2f}",
+                       row=1, col=1, annotation_text=f"1σ Ceiling ${ceil_val:.2f}",
                        annotation_position='right')
+    # 2-sigma lines (lighter)
+    r2s = ranges.get('2sigma', {})
+    if r2s:
+        f2 = r2s['floor'] / r_ratio if r_ratio > 1 else r2s['floor']
+        c2 = r2s['ceiling'] / r_ratio if r_ratio > 1 else r2s['ceiling']
+        fig_frac.add_hline(y=f2, line=dict(color='#26a69a', width=1, dash='dot'),
+                           row=1, col=1, annotation_text=f"2σ ${r2s['floor']:.2f}",
+                           annotation_position='right')
+        fig_frac.add_hline(y=c2, line=dict(color='#ef5350', width=1, dash='dot'),
+                           row=1, col=1, annotation_text=f"2σ ${r2s['ceiling']:.2f}",
+                           annotation_position='right')
 
     # Max pain line
     fig_frac.add_hline(y=result['max_pain'], line=dict(color='#ff9800', width=1, dash='dot'),
-                       row=1, col=1, annotation_text=f"Max Pain ${result['max_pain']:.0f}",
+                       row=1, col=1, annotation_text=f"Max Pain ${result['max_pain']:.0f} (info)",
                        annotation_position='left')
 
     # Fractal dimension subplot
@@ -1229,7 +1264,7 @@ elif page == '🔬 Fractal & Options':
     # SECTION G: Evidence Breakdown Table
     # ══════════════════════════════════════════════════════════════════════
     st.subheader('Evidence Breakdown')
-    st.caption('How each signal contributes to the composite floor, ceiling, and directional bias')
+    st.caption('Signal weights control directional bias voting only. Floor/ceiling uses the evidence-based IV + VRP pipeline.')
 
     evidence_rows = []
     for sig in result['signals']:

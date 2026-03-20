@@ -23,7 +23,12 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from config import SIGNAL_WEIGHTS
+from config import (
+    SIGNAL_WEIGHTS, PARKINSON_WINDOW, VRP_LOOKBACK_DAYS,
+    VRP_MIN_RATIO, VRP_MAX_RATIO, REGIME_SCALE,
+    VIX_CONTANGO_SHRINK, VIX_BACKWARDATION_EXPAND,
+    DEALER_BOUND_BLEND, CONFIDENCE_SIGMAS,
+)
 from options_fetcher import fetch_options_chain, fetch_expiration_dates
 from strategies.fractal_indicators import (
     add_williams_fractals,
@@ -49,6 +54,142 @@ def _bs_gamma(S, K, T, r, sigma):
         return 0.0
     d1 = _bs_d1(S, K, T, r, sigma)
     return norm.pdf(d1) / (S * sigma * math.sqrt(T))
+
+
+# ── Evidence-Based Volatility ─────────────────────────────────────────────
+
+def compute_parkinson_vol(df: pd.DataFrame, window: int = 20) -> float:
+    """
+    Parkinson (1980) range-based volatility estimator.
+    5x more statistically efficient than close-to-close vol.
+
+    Returns annualized volatility as a decimal (e.g. 0.20 = 20%).
+    """
+    if len(df) < window:
+        return float('nan')
+    recent = df.tail(window)
+    log_hl = np.log(recent['High'] / recent['Low'])
+    parkinson_var = (log_hl ** 2).mean() / (4 * np.log(2))
+    return float(np.sqrt(parkinson_var * 252))
+
+
+def compute_vrp_ratio(
+    df: pd.DataFrame,
+    current_iv: float,
+    lookback: int = 63,
+    min_ratio: float = 0.70,
+    max_ratio: float = 1.00,
+) -> dict:
+    """
+    Variance Risk Premium: IV systematically overstates realized vol.
+
+    Returns scaling_factor to deflate IV toward realized vol,
+    clamped to [min_ratio, max_ratio].
+    """
+    if len(df) < lookback or current_iv <= 0:
+        return {
+            'scaling_factor': 0.85, 'iv': current_iv,
+            'rv_parkinson': None, 'rv_close_to_close': None,
+            'vrp_pct': 15.0, 'source': 'default',
+        }
+
+    recent = df.tail(lookback)
+    rv_park = compute_parkinson_vol(recent, window=min(lookback, len(recent)))
+
+    log_ret = np.log(recent['Close'] / recent['Close'].shift(1)).dropna()
+    rv_cc = float(log_ret.std() * np.sqrt(252))
+
+    rv = rv_park if not np.isnan(rv_park) and rv_park > 0 else rv_cc
+    if rv <= 0 or np.isnan(rv):
+        return {
+            'scaling_factor': 0.85, 'iv': current_iv,
+            'rv_parkinson': None, 'rv_close_to_close': round(rv_cc, 4),
+            'vrp_pct': 15.0, 'source': 'default',
+        }
+
+    scaling_factor = float(np.clip(rv / current_iv, min_ratio, max_ratio))
+    vrp_pct = round((1 - rv / current_iv) * 100, 1)
+
+    return {
+        'scaling_factor': round(scaling_factor, 4),
+        'iv': round(current_iv, 4),
+        'rv_parkinson': round(float(rv_park), 4) if not np.isnan(rv_park) else None,
+        'rv_close_to_close': round(rv_cc, 4),
+        'vrp_pct': vrp_pct,
+        'source': 'parkinson',
+    }
+
+
+def compute_vix_term_structure() -> dict:
+    """
+    VIX term structure: contango vs backwardation.
+    Contango (VIX < VIX3M) = calm, ~80% of time. Backwardation = stress.
+    """
+    vix_spot, vix_3m = None, None
+    try:
+        vdf = fetch_stock_data('^VIX', period='5d')
+        if not vdf.empty:
+            vix_spot = float(vdf['Close'].iloc[-1])
+    except Exception:
+        pass
+    try:
+        v3m = fetch_stock_data('^VIX3M', period='5d')
+        if not v3m.empty:
+            vix_3m = float(v3m['Close'].iloc[-1])
+    except Exception:
+        pass
+
+    if vix_spot and vix_3m and vix_3m > 0:
+        ratio = vix_spot / vix_3m
+        if ratio < 0.95:
+            structure = 'contango'
+        elif ratio > 1.05:
+            structure = 'backwardation'
+        else:
+            structure = 'flat'
+    elif vix_spot:
+        structure = 'contango' if vix_spot < 18 else ('backwardation' if vix_spot > 28 else 'flat')
+        ratio = None
+    else:
+        structure, ratio = 'unknown', None
+
+    return {
+        'vix_spot': vix_spot, 'vix_3m': vix_3m,
+        'ratio': round(ratio, 4) if ratio else None,
+        'structure': structure,
+    }
+
+
+def compute_gex_boundaries(gex_df: pd.DataFrame, spot: float) -> dict:
+    """
+    Extract GEX-weighted support/resistance boundaries from the GEX profile.
+    """
+    if gex_df.empty or 'net_gex' not in gex_df.columns:
+        return {'gex_floor': None, 'gex_ceiling': None}
+
+    total_abs = gex_df['net_gex'].abs().sum()
+    if total_abs == 0:
+        return {'gex_floor': None, 'gex_ceiling': None}
+
+    above = gex_df[gex_df['strike'] > spot].copy()
+    below = gex_df[gex_df['strike'] < spot].copy()
+
+    def _weighted(sub):
+        if sub.empty:
+            return None
+        w = sub['net_gex'].abs()
+        if w.sum() == 0:
+            return None
+        return float(np.average(sub['strike'], weights=w))
+
+    # Use top 5 by absolute GEX for each side
+    gex_ceiling = _weighted(above.nlargest(5, 'net_gex') if len(above) > 5 else above)
+    gex_floor = _weighted(below.reindex(below['net_gex'].abs().nlargest(5).index) if len(below) > 5 else below)
+
+    return {
+        'gex_floor': round(gex_floor, 2) if gex_floor else None,
+        'gex_ceiling': round(gex_ceiling, 2) if gex_ceiling else None,
+    }
 
 
 # ── Options Analytics ─────────────────────────────────────────────────────
@@ -150,11 +291,21 @@ def compute_options_walls(
     strongest_call = call_walls[0][0] if call_walls else spot * 1.05
     strongest_put = put_walls[0][0] if put_walls else spot * 0.95
 
+    # OI-weighted cluster levels (more robust than single strongest strike)
+    def _cluster_weighted(walls_list):
+        if not walls_list:
+            return None
+        strikes = np.array([w[0] for w in walls_list])
+        weights = np.array([w[1] for w in walls_list], dtype=float)
+        return float(np.average(strikes, weights=weights)) if weights.sum() > 0 else float(strikes.mean())
+
     return {
         'call_walls': sorted(call_walls, key=lambda x: x[0]),
         'put_walls': sorted(put_walls, key=lambda x: x[0]),
         'strongest_call_wall': strongest_call,
         'strongest_put_wall': strongest_put,
+        'call_cluster_level': round(_cluster_weighted(call_walls) or strongest_call, 2),
+        'put_cluster_level': round(_cluster_weighted(put_walls) or strongest_put, 2),
         'activity_source': col,
     }
 
@@ -372,48 +523,8 @@ def _score_signal(name, value, bias, evidence, weights=None):
     }
 
 
-def _aggregate_signals(signals, spot, walls, fractal_levels, iv_range, max_pain, weights=None):
-    """
-    Aggregate all signals into floor, ceiling, bias, confidence.
-
-    Floor = weighted average of support levels (put wall, fractal support, IV low, max pain).
-    Ceiling = weighted average of resistance levels (call wall, fractal resistance, IV high).
-    Bias = weighted vote of all signals.
-    Confidence = degree of agreement among signals (0-100).
-    """
-    # ── Floor (support) ──
-    floor_candidates = []
-    w = weights if weights is not None else SIGNAL_WEIGHTS
-
-    floor_candidates.append((walls['strongest_put_wall'], w['options_walls']))
-    floor_candidates.append((iv_range.get('daily_range_low', spot * 0.99), w['iv_range']))
-
-    if fractal_levels['support_levels']:
-        nearest_sup = fractal_levels['support_levels'][0][1]
-        floor_candidates.append((nearest_sup, w['fractals']))
-
-    if max_pain < spot:
-        floor_candidates.append((max_pain, w['max_pain']))
-
-    total_w = sum(c[1] for c in floor_candidates)
-    floor = sum(c[0] * c[1] for c in floor_candidates) / total_w if total_w > 0 else spot * 0.98
-
-    # ── Ceiling (resistance) ──
-    ceil_candidates = []
-    ceil_candidates.append((walls['strongest_call_wall'], w['options_walls']))
-    ceil_candidates.append((iv_range.get('daily_range_high', spot * 1.01), w['iv_range']))
-
-    if fractal_levels['resistance_levels']:
-        nearest_res = fractal_levels['resistance_levels'][0][1]
-        ceil_candidates.append((nearest_res, w['fractals']))
-
-    if max_pain > spot:
-        ceil_candidates.append((max_pain, w['max_pain']))
-
-    total_w = sum(c[1] for c in ceil_candidates)
-    ceiling = sum(c[0] * c[1] for c in ceil_candidates) / total_w if total_w > 0 else spot * 1.02
-
-    # ── Bias (weighted vote) ──
+def _compute_bias(signals):
+    """Weighted vote of all signals for directional bias (unchanged logic)."""
     bullish_w, bearish_w, neutral_w = 0.0, 0.0, 0.0
     for sig in signals:
         sw = sig['weight']
@@ -431,15 +542,102 @@ def _aggregate_signals(signals, spot, walls, fractal_levels, iv_range, max_pain,
     else:
         bias = 'NEUTRAL'
 
-    # Confidence = how dominant the winning bias is
     total = bullish_w + bearish_w + neutral_w
-    if total > 0:
-        dominant = max(bullish_w, bearish_w, neutral_w)
-        confidence = (dominant / total) * 100
-    else:
-        confidence = 0.0
+    confidence = (max(bullish_w, bearish_w, neutral_w) / total * 100) if total > 0 else 0.0
+    return bias, confidence
 
-    return floor, ceiling, bias, confidence
+
+def _compute_floor_ceiling(
+    spot, iv_range, vrp, vix_term, gex_bounds, walls, regime, fractal_dim,
+):
+    """
+    Evidence-based floor/ceiling computation.
+
+    Pipeline:
+      1. BASE: IV expected move (1-sigma daily)
+      2. ADJUST: Scale by Variance Risk Premium (IV overstates realized vol)
+      3. REGIME: Widen/narrow via fractal dimension + VIX term structure
+      4. BOUND: Cap at GEX clusters + OI wall boundaries
+      5. OUTPUT: Multiple confidence levels (68%, 87%, 95%)
+    """
+    # Step 1: Base daily move from IV
+    base_move = iv_range.get('daily_expected_move', spot * 0.01)
+    iv_used = iv_range.get('iv_used', 0.20)
+
+    # Step 2: VRP adjustment — deflate IV toward realized vol
+    vrp_factor = vrp.get('scaling_factor', 0.85)
+    adjusted_move = base_move * vrp_factor
+
+    # Step 3: Regime scaling
+    regime_factor = REGIME_SCALE.get(regime, 1.0)
+    structure = vix_term.get('structure', 'unknown')
+    if structure == 'contango':
+        term_factor = VIX_CONTANGO_SHRINK
+    elif structure == 'backwardation':
+        term_factor = VIX_BACKWARDATION_EXPAND
+    else:
+        term_factor = 1.0
+    total_regime = regime_factor * term_factor
+    final_move = adjusted_move * total_regime
+
+    # Step 4 + 5: Multi-sigma ranges with dealer bounding
+    blend = DEALER_BOUND_BLEND
+    wall_floor = walls.get('put_cluster_level', walls['strongest_put_wall'])
+    wall_ceil = walls.get('call_cluster_level', walls['strongest_call_wall'])
+    gex_floor = gex_bounds.get('gex_floor')
+    gex_ceil = gex_bounds.get('gex_ceiling')
+
+    # Best dealer boundary: blend GEX and walls
+    if gex_floor and gex_floor < spot:
+        dealer_floor = gex_floor * 0.6 + wall_floor * 0.4
+    else:
+        dealer_floor = wall_floor
+    if gex_ceil and gex_ceil > spot:
+        dealer_ceil = gex_ceil * 0.6 + wall_ceil * 0.4
+    else:
+        dealer_ceil = wall_ceil
+
+    ranges = {}
+    for label, sigma in CONFIDENCE_SIGMAS.items():
+        move = final_move * sigma
+        raw_floor = spot - move
+        raw_ceil = spot + move
+
+        # Bound: if dealer level is tighter than IV model, blend toward it
+        if dealer_floor > raw_floor and dealer_floor < spot:
+            bounded_floor = raw_floor * (1 - blend) + dealer_floor * blend
+        else:
+            bounded_floor = raw_floor
+        if dealer_ceil < raw_ceil and dealer_ceil > spot:
+            bounded_ceil = raw_ceil * (1 - blend) + dealer_ceil * blend
+        else:
+            bounded_ceil = raw_ceil
+
+        ranges[label] = {
+            'floor': round(bounded_floor, 2),
+            'ceiling': round(bounded_ceil, 2),
+            'move': round(move, 2),
+            'sigma': sigma,
+            'probability': round((2 * norm.cdf(sigma) - 1) * 100, 1),
+        }
+
+    primary = ranges['1sigma']
+    return {
+        'floor': primary['floor'],
+        'ceiling': primary['ceiling'],
+        'ranges': ranges,
+        'methodology': {
+            'base_move': round(base_move, 2),
+            'vrp_factor': vrp_factor,
+            'adjusted_move': round(adjusted_move, 2),
+            'regime_factor': regime_factor,
+            'term_factor': term_factor,
+            'total_regime': round(total_regime, 3),
+            'final_move': round(final_move, 2),
+            'dealer_floor': round(dealer_floor, 2),
+            'dealer_ceiling': round(dealer_ceil, 2),
+        },
+    }
 
 
 def compute_composite_analysis(
@@ -513,6 +711,13 @@ def compute_composite_analysis(
     pc_ratios = compute_put_call_ratios(calls, puts)
     skew = compute_iv_skew(calls, puts, spot)
 
+    # 4b. Evidence-based analytics
+    parkinson_rv = compute_parkinson_vol(df, window=PARKINSON_WINDOW)
+    vrp = compute_vrp_ratio(df, iv_range['iv_used'], lookback=VRP_LOOKBACK_DAYS,
+                            min_ratio=VRP_MIN_RATIO, max_ratio=VRP_MAX_RATIO)
+    vix_term = compute_vix_term_structure()
+    gex_bounds = compute_gex_boundaries(gex_df, spot)
+
     # 5. Build individual signal scores
     active_w = weights  # None falls through to SIGNAL_WEIGHTS in _score_signal
     signals = []
@@ -573,11 +778,16 @@ def compute_composite_analysis(
         weights=active_w,
     ))
 
-    # 6. Composite aggregation
-    floor, ceiling, bias, confidence = _aggregate_signals(
-        signals, spot, walls, fractal_levels, iv_range, max_pain_strike,
-        weights=active_w,
+    # 6. Evidence-based floor/ceiling (replaces old weighted average)
+    fc_result = _compute_floor_ceiling(
+        spot=spot, iv_range=iv_range, vrp=vrp, vix_term=vix_term,
+        gex_bounds=gex_bounds, walls=walls, regime=regime, fractal_dim=current_fd,
     )
+    floor = fc_result['floor']
+    ceiling = fc_result['ceiling']
+
+    # 7. Bias via weighted vote (separate from range)
+    bias, confidence = _compute_bias(signals)
 
     # Scale floor/ceiling for futures proxy
     display_spot = meta.get('futures_spot', spot)
@@ -588,6 +798,18 @@ def compute_composite_analysis(
         display_floor = floor
         display_ceiling = ceiling
         display_spot = spot
+
+    # Scale multi-sigma ranges for futures proxy
+    ranges_display = {}
+    for label, r in fc_result['ranges'].items():
+        if proxy_used and price_ratio > 1:
+            ranges_display[label] = {
+                **r,
+                'floor': round(r['floor'] * price_ratio, 2),
+                'ceiling': round(r['ceiling'] * price_ratio, 2),
+            }
+        else:
+            ranges_display[label] = r
 
     return {
         'ticker': ticker.upper(),
@@ -602,6 +824,12 @@ def compute_composite_analysis(
         'ceiling': round(display_ceiling, 2),
         'bias': bias,
         'confidence': round(confidence, 1),
+        'ranges': ranges_display,
+        'range_methodology': fc_result['methodology'],
+        'vrp': vrp,
+        'parkinson_rv': round(parkinson_rv, 4) if not np.isnan(parkinson_rv) else None,
+        'vix_term_structure': vix_term,
+        'gex_boundaries': gex_bounds,
         'iv_range': iv_range,
         'gex_profile': gex_df,
         'options_walls': walls,

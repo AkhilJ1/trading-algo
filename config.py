@@ -45,7 +45,7 @@ FUTURES_PROXY = {
     'YM=F': 'DIA',
 }
 
-# Composite signal weights (must sum to 1.0)
+# Bias voting weights (sum to 1.0) — controls directional bias only, NOT floor/ceiling
 SIGNAL_WEIGHTS = {
     'options_walls':    0.25,
     'gex_levels':       0.20,
@@ -54,6 +54,33 @@ SIGNAL_WEIGHTS = {
     'put_call_ratio':   0.10,
     'iv_skew':          0.05,
     'max_pain':         0.05,
+}
+
+# ── Evidence-Based Range Engine ────────────────────────────────────────
+# Variance Risk Premium (IV systematically overstates realized vol)
+PARKINSON_WINDOW = 20           # Trading days for Parkinson vol estimator
+VRP_LOOKBACK_DAYS = 63          # ~3 months for IV/RV ratio
+VRP_MIN_RATIO = 0.70            # Floor: never shrink IV below 70%
+VRP_MAX_RATIO = 1.00            # Ceiling: never inflate IV
+
+# Regime-based range scaling
+REGIME_SCALE = {
+    'trending':      1.20,      # Wider range in trending markets
+    'transitional':  1.00,      # Baseline
+    'choppy':        0.85,      # Tighter range in mean-reverting markets
+}
+VIX_CONTANGO_SHRINK = 0.95      # Contango (normal): slight range tightening
+VIX_BACKWARDATION_EXPAND = 1.10 # Backwardation (fear): range widening
+
+# Dealer hedging boundary blend (how much weight to give GEX/walls vs IV model)
+DEALER_BOUND_BLEND = 0.30       # 30% dealer levels, 70% IV-based
+WALL_CLUSTER_WIDTH = 0.02       # 2% of spot for OI strike clustering
+
+# Multi-sigma confidence levels for iron condor strike selection
+CONFIDENCE_SIGMAS = {
+    '1sigma':   1.0,            # ~68.3% probability
+    '1_5sigma': 1.5,            # ~86.6% probability
+    '2sigma':   2.0,            # ~95.4% probability
 }
 
 # ── Google Sheets Config ─────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 """
-Auto-Retune Engine — Safe signal weight optimization.
------------------------------------------------------
-Analyzes historical prediction accuracy per signal, adjusts weights
-to improve floor/ceiling range accuracy, with guard rails.
+Auto-Retune Engine — Safe optimization of bias weights and regime parameters.
+------------------------------------------------------------------------------
+Floor/ceiling is now computed via the evidence-based IV+VRP pipeline
+(not from signal weights). This engine tunes:
+  - Signal weights for BIAS VOTING only
+  - Regime scaling factors (via learn_regime_adjustments)
 
 Safety rails:
   - Minimum 60 days of data before retuning
