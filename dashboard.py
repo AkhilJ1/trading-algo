@@ -907,10 +907,12 @@ elif page == '📊 Stock Chart':
     if show_fractal_sr and fractal_levels:
         for _, level in fractal_levels.get('support_levels', [])[:3]:
             fig.add_hline(y=level, line=dict(color='#26a69a', width=1, dash='dash'),
-                          annotation_text=f'S ${level:.0f}', annotation_position='left', row=1, col=1)
+                          annotation_text=f'S ${level:.0f}', annotation_position='right',
+                          annotation=dict(font_size=10, font_color='#26a69a'), row=1, col=1)
         for _, level in fractal_levels.get('resistance_levels', [])[:3]:
             fig.add_hline(y=level, line=dict(color='#ef5350', width=1, dash='dash'),
-                          annotation_text=f'R ${level:.0f}', annotation_position='left', row=1, col=1)
+                          annotation_text=f'R ${level:.0f}', annotation_position='right',
+                          annotation=dict(font_size=10, font_color='#ef5350'), row=1, col=1)
 
     # Anchored VWAP
     if show_anchored_vwap:
@@ -955,7 +957,9 @@ elif page == '📊 Stock Chart':
                 )
             # POC line
             fig.add_hline(y=vp['poc'], line=dict(color='#42a5f5', width=1, dash='dot'),
-                          annotation_text=f"POC ${vp['poc']:.0f}", annotation_position='right', row=1, col=1)
+                          annotation_text=f"POC ${vp['poc']:.0f}",
+                          annotation=dict(font_size=10, font_color='#42a5f5',
+                                          xanchor='left', x=0.01), row=1, col=1)
 
     # Entry/Exit markers
     if show_entries:
@@ -994,30 +998,41 @@ elif page == '📊 Stock Chart':
                                   line=dict(color='#9c27b0', width=1.5)), row=3, col=1)
         for level, color, label in [(30, '#26a69a', 'Oversold'), (70, '#ef5350', 'Overbought')]:
             fig.add_hline(y=level, line=dict(color=color, width=1, dash='dash'),
-                          row=3, col=1, annotation_text=label, annotation_position='right')
+                          row=3, col=1)
 
     # Z-Score subplot
     if show_zscore:
         zs = compute_zscore(df_display)
         fig.add_trace(go.Scatter(x=df_display.index, y=zs, name='Z-Score',
                                   line=dict(color='#29b6f6', width=1.5)), row=4, col=1)
-        fig.add_hline(y=-2, line=dict(color='#26a69a', width=1, dash='dash'), row=4, col=1,
-                      annotation_text='Buy (-2)', annotation_position='right')
-        fig.add_hline(y=2, line=dict(color='#ef5350', width=1, dash='dash'), row=4, col=1,
-                      annotation_text='Sell (+2)', annotation_position='right')
+        fig.add_hline(y=-2, line=dict(color='#26a69a', width=1, dash='dash'), row=4, col=1)
+        fig.add_hline(y=2, line=dict(color='#ef5350', width=1, dash='dash'), row=4, col=1)
         fig.add_hline(y=0, line=dict(color='#666', width=0.5), row=4, col=1)
 
     fig.update_layout(
-        height=750 + (100 if show_zscore else 0),
+        height=800 + (120 if show_zscore else 0),
         xaxis_rangeslider_visible=False,
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-        margin=dict(t=50, b=20, l=0, r=80),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1,
+                    font=dict(size=11)),
+        margin=dict(t=50, b=20, l=60, r=50),
         paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
-        font=dict(color='#fafafa'),
+        font=dict(color='#fafafa', size=12),
     )
     fig.update_xaxes(gridcolor='#1e2130', showgrid=True)
     fig.update_yaxes(gridcolor='#1e2130', showgrid=True)
-    fig.update_yaxes(range=[0, 100], row=3, col=1)
+
+    # Price axis: clean tick format, controlled density
+    fig.update_yaxes(tickprefix='$', tickformat='.0f', nticks=8,
+                     title_text='', row=1, col=1)
+    # Volume axis: abbreviated format
+    fig.update_yaxes(tickformat='.2s', nticks=4,
+                     title_text='', row=2, col=1)
+    # RSI axis: fixed 0-100 range, few ticks
+    fig.update_yaxes(range=[0, 100], nticks=5, tickvals=[0, 30, 50, 70, 100],
+                     title_text='', row=3, col=1)
+    # Z-Score axis (if visible)
+    if show_zscore:
+        fig.update_yaxes(nticks=5, title_text='', row=4, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
 
