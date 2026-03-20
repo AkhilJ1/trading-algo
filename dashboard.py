@@ -924,20 +924,30 @@ elif page == '📊 Stock Chart':
                 line=dict(color=avwap_colors[i % len(avwap_colors)], width=1, dash='dashdot'),
             ), row=1, col=1)
 
-    # Volume Profile (horizontal bars via shapes — avoids xaxis conflict with subplots)
+    # Volume Profile (horizontal bars anchored to right edge of chart)
     if show_vol_profile:
         vp = compute_volume_profile(df_display)
         if vp['volumes']:
             max_vol = max(vp['volumes']) if max(vp['volumes']) > 0 else 1
-            for i_vp, (center, vol) in enumerate(zip(vp['bin_centers'], vp['volumes'])):
+            # Use date-based x coordinates: bars extend leftward from the last date
+            n_bars_display = len(df_display)
+            x_end = df_display.index[-1]
+            # Each bar extends leftward by up to 20% of the visible date range
+            if n_bars_display > 1:
+                date_span = (df_display.index[-1] - df_display.index[0])
+                max_bar_span = date_span * 0.20
+            else:
+                max_bar_span = pd.Timedelta(days=5)
+
+            bar_width = (vp['bin_centers'][1] - vp['bin_centers'][0]) * 0.8 if len(vp['bin_centers']) > 1 else 1
+            for center, vol in zip(vp['bin_centers'], vp['volumes']):
                 if vol <= 0:
                     continue
-                bar_width = (vp['bin_centers'][1] - vp['bin_centers'][0]) * 0.8 if len(vp['bin_centers']) > 1 else 1
-                bar_length = vol / max_vol * 0.20  # 20% of chart width (paper coords)
+                bar_span = max_bar_span * (vol / max_vol)
+                x_start = x_end - bar_span
                 fig.add_shape(
                     type='rect',
-                    xref='paper', yref='y',
-                    x0=1.0 - bar_length, x1=1.0,
+                    x0=x_start, x1=x_end,
                     y0=center - bar_width / 2, y1=center + bar_width / 2,
                     fillcolor='rgba(66,165,245,0.15)',
                     line=dict(width=0),
