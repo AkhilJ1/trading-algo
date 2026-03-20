@@ -62,6 +62,36 @@ def scan_ticker(ticker: str) -> Optional[dict]:
     }
 
 
+def scan_ticker_enhanced(ticker: str) -> Optional[dict]:
+    """
+    Enhanced scan with multi-factor scoring (RSI + Z-Score + Volume + Regime + ATR).
+    Returns None if data is unavailable.
+    """
+    base = scan_ticker(ticker)
+    if base is None:
+        return None
+
+    try:
+        from strategies.chart_indicators import compute_multi_factor_score
+        df = fetch_stock_data(ticker)
+        if df.empty:
+            return base
+        factors = compute_multi_factor_score(df)
+        base.update({
+            'zscore': factors['zscore'],
+            'volume_surge': factors['volume_surge'],
+            'regime': factors['regime'],
+            'atr_state': factors['atr_state'],
+            'composite_score': factors['composite'],
+            'factors': factors,
+        })
+    except Exception:
+        base['composite_score'] = base.get('strength', 0)
+        base['factors'] = None
+
+    return base
+
+
 def run_scanner(watchlist: list = WATCHLIST) -> list:
     width = 62
     print(f"\n{'='*width}")

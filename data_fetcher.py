@@ -39,6 +39,8 @@ def fetch_stock_data(
     # Strip timezone before caching so CSV round-trips cleanly
     if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
         df.index = df.index.tz_localize(None)
+    # Drop rows with NaN Close (yfinance returns NaN for today before market close)
+    df = df.dropna(subset=['Close'])
     df.to_csv(cache_file)
     return df
 

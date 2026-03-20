@@ -83,6 +83,27 @@ CONFIDENCE_SIGMAS = {
     '2sigma':   2.0,            # ~95.4% probability
 }
 
+# ── Chart Indicators ────────────────────────────────────────────────────
+VWAP_WINDOW = 20                # Rolling window for daily VWAP
+ZSCORE_WINDOW = 50              # Lookback for Z-score calculation
+KELTNER_EMA = 20                # Keltner channel EMA period
+KELTNER_ATR = 10                # Keltner channel ATR period
+KELTNER_MULT = 2.25             # Keltner channel ATR multiplier
+ATR_STOP_PERIOD = 14            # ATR period for trailing stop
+ATR_STOP_MULT = 2.0             # ATR multiplier for trailing stop
+
+# Scanner Multi-Factor Weights (sum to 1.0)
+SCANNER_WEIGHTS = {
+    'rsi':     0.25,
+    'zscore':  0.25,
+    'volume':  0.15,
+    'regime':  0.20,
+    'atr':     0.15,
+}
+
+# Monte Carlo Simulation
+MC_SIMULATIONS = 1000           # Number of reshuffles for Monte Carlo
+
 # ── Google Sheets Config ─────────────────────────────────────────────────
 GSHEET_SPREADSHEET_NAME = "TradingAlgoPredictions"
 GSHEET_PREDICTIONS_SHEET = "Predictions"

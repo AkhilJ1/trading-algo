@@ -17,6 +17,7 @@ import os
 from datetime import date, timedelta
 
 import streamlit as st
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -254,34 +255,39 @@ def build_chart(df: pd.DataFrame, ticker: str, chart_type: str = 'Candlestick') 
 # Shared scanner helpers
 # ===========================================================================
 def _run_scan(tickers: list) -> dict:
-    """Scan a list of tickers; return {buy, watch, errors} dict."""
-    buy, watch, errors = [], [], []
+    """Scan a list of tickers with multi-factor scoring; return {buy, watch, all, errors} dict."""
+    from scanner import scan_ticker_enhanced
+    buy, watch, all_results, errors = [], [], [], []
     status = st.empty()
     bar = st.progress(0)
     for i, ticker in enumerate(tickers):
         status.text(f'Scanning {ticker}… ({i+1}/{len(tickers)})')
         bar.progress((i + 1) / len(tickers))
         try:
-            result = scan_ticker(ticker)
+            result = scan_ticker_enhanced(ticker)
             if result is None:
                 errors.append((ticker, 'Insufficient data'))
-            elif result['buy_signal']:
-                buy.append(result)
-            elif result['rsi_oversold']:
-                watch.append(result)
+            else:
+                all_results.append(result)
+                if result['buy_signal']:
+                    buy.append(result)
+                elif result['rsi_oversold']:
+                    watch.append(result)
         except Exception as e:
             errors.append((ticker, str(e)))
     status.empty()
     bar.empty()
-    buy.sort(key=lambda x: x['strength'], reverse=True)
+    buy.sort(key=lambda x: x.get('composite_score', x['strength']), reverse=True)
     watch.sort(key=lambda x: x['rsi'])
-    return {'buy': buy, 'watch': watch, 'errors': errors}
+    all_results.sort(key=lambda x: x.get('composite_score', 0), reverse=True)
+    return {'buy': buy, 'watch': watch, 'all': all_results, 'errors': errors}
 
 
 def _render_scan_results(results: dict, total: int) -> None:
-    """Render buy signals, watch list, and errors from a results dict."""
+    """Render buy signals, watch list, factor breakdown, and errors."""
     buy_signals = results['buy']
     watch_only  = results['watch']
+    all_results = results.get('all', [])
     errors      = results['errors']
 
     c1, c2, c3, c4 = st.columns(4)
@@ -292,7 +298,7 @@ def _render_scan_results(results: dict, total: int) -> None:
     st.markdown('---')
 
     if buy_signals:
-        st.subheader('✅ Buy Signals')
+        st.subheader('Buy Signals')
         for sig in buy_signals:
             xo = sig['ma_last_crossover']
             xo_str = ''
@@ -300,18 +306,31 @@ def _render_scan_results(results: dict, total: int) -> None:
                 d = xo['date'].strftime('%Y-%m-%d') if hasattr(xo['date'], 'strftime') else str(xo['date'])[:10]
                 xo_str = f"Last {xo['type'].replace('_', ' ')} on {d} @ ${xo['price']:.2f}"
             wick_dates = ', '.join(sig['wick_dates'][-3:]) if sig['wick_dates'] else 'none'
+            factors = sig.get('factors')
+            composite = sig.get('composite_score', sig['strength'])
             with st.expander(
-                f"**{sig['ticker']}**  —  ${sig['price']:.2f}  |  Strength {sig['strength']:.0f}/100",
+                f"**{sig['ticker']}**  —  ${sig['price']:.2f}  |  Score {composite:.0f}/100",
                 expanded=True,
             ):
-                r1c1, r1c2, r1c3 = st.columns(3)
+                r1c1, r1c2, r1c3, r1c4 = st.columns(4)
                 r1c1.metric('Price', f"${sig['price']:.2f}")
                 r1c2.metric('RSI', f"{sig['rsi']:.1f}")
                 r1c3.metric('Strength', f"{sig['strength']:.0f}/100")
-                r2c1, r2c2, r2c3 = st.columns(3)
-                r2c1.metric('BB Lower', f"${sig['bb_lower']:.2f}")
-                r2c2.metric('BB Mid', f"${sig['bb_mid']:.2f}")
-                r2c3.metric('BB Upper', f"${sig['bb_upper']:.2f}")
+                r1c4.metric('Composite', f"{composite:.0f}/100")
+                if factors:
+                    # Factor dots
+                    def _dot(val, label):
+                        color = '#26a69a' if val > 0 else '#666'
+                        return f'<span style="color:{color};font-weight:bold;">{label}</span>'
+                    dots = ' · '.join([
+                        _dot(factors['rsi_score'], f"RSI {factors['rsi_score']:.0f}"),
+                        _dot(factors['zscore_score'], f"Z {factors['zscore_score']:.0f}"),
+                        _dot(factors['volume_score'], f"Vol {factors['volume_score']:.0f}"),
+                        _dot(factors['regime_score'], f"Rgm {factors['regime_score']:.0f}"),
+                        _dot(factors['atr_score'], f"ATR {factors['atr_score']:.0f}"),
+                    ])
+                    st.markdown(dots, unsafe_allow_html=True)
+                    st.caption(f"Z-Score: {factors['zscore']:.2f}  |  Regime: {factors['regime'].title()}  |  ATR: {factors['atr_state']}")
                 st.markdown(
                     f"**MA Trend:** {sig['ma_trend'].upper()}  |  "
                     f"**Wick touches:** {sig['wick_touches']} → {wick_dates}"
@@ -322,18 +341,51 @@ def _render_scan_results(results: dict, total: int) -> None:
         st.info('No full buy signals in this list.')
 
     if watch_only:
-        st.subheader('👀 Watch — RSI Oversold, Awaiting BB Wick Touch')
-        st.dataframe(pd.DataFrame([{
-            'Ticker': s['ticker'],
-            'Price': f"${s['price']:.2f}",
-            'RSI': round(s['rsi'], 1),
-            'BB Lower': f"${s['bb_lower']:.2f}",
-            'BB Upper': f"${s['bb_upper']:.2f}",
-            'MA Trend': s['ma_trend'].upper(),
-        } for s in watch_only]))
+        st.subheader('Watch — RSI Oversold, Awaiting BB Wick Touch')
+        watch_data = []
+        for s in watch_only:
+            row = {
+                'Ticker': s['ticker'],
+                'Price': f"${s['price']:.2f}",
+                'RSI': round(s['rsi'], 1),
+                'BB Lower': f"${s['bb_lower']:.2f}",
+                'BB Upper': f"${s['bb_upper']:.2f}",
+                'MA Trend': s['ma_trend'].upper(),
+            }
+            if s.get('factors'):
+                row['Regime'] = s['factors']['regime'].title()
+                row['Z-Score'] = s['factors']['zscore']
+                row['Score'] = s.get('composite_score', 0)
+            watch_data.append(row)
+        st.dataframe(pd.DataFrame(watch_data))
+
+    # Factor breakdown table (all scanned tickers)
+    if all_results:
+        with st.expander('Factor Breakdown (all scanned tickers)'):
+            factor_rows = []
+            for r in all_results:
+                f = r.get('factors')
+                row = {
+                    'Ticker': r['ticker'],
+                    'Price': f"${r['price']:.2f}",
+                    'RSI': round(r['rsi'], 1),
+                }
+                if f:
+                    row.update({
+                        'RSI Score': f['rsi_score'],
+                        'Z-Score': f['zscore'],
+                        'Z Score': f['zscore_score'],
+                        'Vol Score': f['volume_score'],
+                        'Regime': f['regime'].title(),
+                        'Regime Score': f['regime_score'],
+                        'ATR Score': f['atr_score'],
+                        'Composite': r.get('composite_score', 0),
+                    })
+                factor_rows.append(row)
+            st.dataframe(pd.DataFrame(factor_rows))
 
     if errors:
-        with st.expander(f'⚠️ Errors ({len(errors)})'):
+        with st.expander(f'Errors ({len(errors)})'):
             for ticker, err in errors:
                 st.warning(f'**{ticker}**: {err}')
 
@@ -539,7 +591,35 @@ elif page == '📊 Stock Chart':
         st.warning('No data in selected range.')
         st.stop()
 
-    # ── Signal banner (always based on latest full-data bar) ───────────────
+    # ── Overlay controls ─────────────────────────────────────────────────
+    from strategies.chart_indicators import (
+        compute_vwap, compute_anchored_vwap, find_anchor_events,
+        compute_volume_profile, compute_zscore, compute_keltner_channels,
+        compute_atr_stops, compute_confluence_signals,
+    )
+    from strategies.fractal_indicators import (
+        add_williams_fractals, calculate_fractal_dimension,
+        classify_regime, get_recent_fractal_levels,
+    )
+
+    with st.expander('Chart Overlays', expanded=False):
+        ov1, ov2, ov3, ov4 = st.columns(4)
+        show_vwap = ov1.checkbox('VWAP', value=True)
+        show_keltner = ov2.checkbox('Keltner Channels', value=False)
+        show_vol_profile = ov3.checkbox('Volume Profile', value=True)
+        show_fractal_sr = ov4.checkbox('Fractal S/R', value=True)
+        ov5, ov6, ov7, ov8 = st.columns(4)
+        show_zscore = ov5.checkbox('Z-Score Subplot', value=False)
+        show_atr_stop = ov6.checkbox('ATR Stop', value=True)
+        show_anchored_vwap = ov7.checkbox('Anchored VWAP', value=False)
+        show_entries = ov8.checkbox('Entry/Exit Markers', value=True)
+
+    # Strategy for entry/exit markers
+    if show_entries:
+        STRAT_OPTIONS = ['MA Crossover', 'MACD + RSI', 'BB Squeeze', 'TSMOM', 'Turtle', 'Fractal', 'Ensemble']
+        chart_strategy = st.selectbox('Signal strategy for entries/exits', STRAT_OPTIONS, index=5, key='chart_strat')
+
+    # ── Compute indicators on full data ───────────────────────────────────
     try:
         signal = get_buy_signal(df_full)
         ma_info = current_signal(df_full)
@@ -547,30 +627,242 @@ elif page == '📊 Stock Chart':
         st.error(f'Signal error: {e}')
         st.stop()
 
-    if signal['buy_signal']:
-        st.success(
-            f"BUY  —  Strength {signal['strength']:.0f}/100  "
-            f"(RSI {signal['rsi']:.1f}, {signal['wick_touches']} BB wick touch(es))"
-        )
-    elif signal['rsi_oversold']:
-        st.warning(f"WATCH  —  RSI oversold ({signal['rsi']:.1f}), no recent BB wick touch")
+    # Fractal levels (for S/R lines and confluence)
+    df_frac = add_williams_fractals(df_full.copy())
+    fd_series = calculate_fractal_dimension(df_frac)
+    current_fd = float(fd_series.dropna().iloc[-1]) if not fd_series.dropna().empty else 1.5
+    regime = classify_regime(current_fd)
+    fractal_levels = get_recent_fractal_levels(df_frac)
+
+    # Confluence signals
+    confluence = compute_confluence_signals(df_full, fractal_levels)
+    latest_score = int(confluence['signal_score'].iloc[-1])
+    latest_label = confluence['signal_label'].iloc[-1]
+
+    # ── Confluence signal banner ──────────────────────────────────────────
+    score_details = []
+    last_row = confluence.iloc[-1]
+    if last_row.get('rsi_buy', False):
+        score_details.append('RSI oversold')
+    if last_row.get('rsi_sell', False):
+        score_details.append('RSI overbought')
+    if last_row.get('zscore_buy', False):
+        score_details.append('Z-Score extreme low')
+    if last_row.get('zscore_sell', False):
+        score_details.append('Z-Score extreme high')
+    if last_row.get('keltner_buy', False):
+        score_details.append('Below Keltner')
+    if last_row.get('keltner_sell', False):
+        score_details.append('Above Keltner')
+    if last_row.get('fractal_buy', False):
+        score_details.append('Near fractal support')
+    if last_row.get('fractal_sell', False):
+        score_details.append('Near fractal resistance')
+    if last_row.get('vol_surge', False):
+        score_details.append('Volume surge')
+    detail_str = ' + '.join(score_details) if score_details else 'No signals firing'
+
+    if latest_score >= 2:
+        st.success(f"STRONG BUY  —  Confluence {latest_score}/5  |  {detail_str}")
+    elif latest_score == 1:
+        st.success(f"BUY  —  Confluence {latest_score}/5  |  {detail_str}")
+    elif latest_score == 0:
+        st.info(f"NEUTRAL  —  {detail_str}")
+    elif latest_score == -1:
+        st.warning(f"SELL  —  Confluence {latest_score}/5  |  {detail_str}")
     else:
-        st.info(f"No signal  —  RSI {signal['rsi']:.1f}")
+        st.error(f"STRONG SELL  —  Confluence {latest_score}/5  |  {detail_str}")
 
-    # ── Metrics row ────────────────────────────────────────────────────────
-    m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
+    # ── Metrics rows ──────────────────────────────────────────────────────
+    vwap_val = float(compute_vwap(df_full).iloc[-1]) if len(df_full) >= 20 else 0
+    zscore_val = float(compute_zscore(df_full).iloc[-1]) if len(df_full) >= 50 else 0
+    atr_stop_val = float(compute_atr_stops(df_full).iloc[-1]) if len(df_full) >= 14 else 0
+
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric('Price', f"${signal['close']:.2f}")
-    m2.metric('RSI', f"{signal['rsi']:.1f}")
-    m3.metric('BB Lower', f"${signal['bb_lower']:.2f}")
-    m4.metric('BB Mid', f"${signal['bb_mid']:.2f}")
-    m5.metric('BB Upper', f"${signal['bb_upper']:.2f}")
-    m6.metric(f'SMA {MA_SHORT}', f"${ma_info.get(f'sma_{MA_SHORT}', 0):.2f}")
-    m7.metric(f'SMA {MA_LONG}', f"${ma_info.get(f'sma_{MA_LONG}', 0):.2f}")
-    m8.metric('MA Trend', ma_info['trend'].upper())
+    m2.metric('VWAP', f"${vwap_val:.2f}")
+    m3.metric('Z-Score', f"{zscore_val:.2f}")
+    m4.metric('ATR Stop', f"${atr_stop_val:.2f}")
+    m5.metric('Confluence', f"{latest_score}/5")
 
-    # ── Chart ──────────────────────────────────────────────────────────────
-    fig = build_chart(df_display, ticker, chart_type)
-    st.plotly_chart(fig)
+    n1, n2, n3, n4, n5 = st.columns(5)
+    n1.metric('RSI', f"{signal['rsi']:.1f}")
+    n2.metric('BB Lower/Upper', f"${signal['bb_lower']:.0f} / ${signal['bb_upper']:.0f}")
+    n3.metric(f'SMA {MA_SHORT}/{MA_LONG}', f"${ma_info.get(f'sma_{MA_SHORT}', 0):.0f} / ${ma_info.get(f'sma_{MA_LONG}', 0):.0f}")
+    n4.metric('Regime', regime.title())
+    n5.metric('MA Trend', ma_info['trend'].upper())
+
+    # ── Build enhanced chart ──────────────────────────────────────────────
+    n_rows = 3 + (1 if show_zscore else 0)
+    row_heights = [0.55, 0.15, 0.20] + ([0.10] if show_zscore else [])
+    subtitles = [ticker, 'Volume', 'RSI (14)'] + (['Z-Score'] if show_zscore else [])
+
+    fig = make_subplots(
+        rows=n_rows, cols=1, shared_xaxes=True,
+        row_heights=row_heights, vertical_spacing=0.02,
+        subplot_titles=subtitles,
+    )
+
+    # Price
+    if chart_type == 'Candlestick':
+        fig.add_trace(go.Candlestick(
+            x=df_display.index, open=df_display['Open'], high=df_display['High'],
+            low=df_display['Low'], close=df_display['Close'], name='Price',
+            increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
+        ), row=1, col=1)
+    else:
+        fig.add_trace(go.Scatter(
+            x=df_display.index, y=df_display['Close'], name='Close',
+            line=dict(color='#26a69a', width=1.5),
+            fill='tozeroy', fillcolor='rgba(38,166,154,0.07)',
+        ), row=1, col=1)
+
+    # BB bands
+    if 'BB_upper' in df_display.columns:
+        fig.add_trace(go.Scatter(x=df_display.index, y=df_display['BB_upper'], name='BB Upper',
+                                  line=dict(color='rgba(100,149,237,0.5)', width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_display.index, y=df_display['BB_lower'], name='BB Lower',
+                                  line=dict(color='rgba(100,149,237,0.5)', width=1),
+                                  fill='tonexty', fillcolor='rgba(100,149,237,0.07)'), row=1, col=1)
+
+    # SMAs
+    sma_s, sma_l = f'SMA_{MA_SHORT}', f'SMA_{MA_LONG}'
+    if sma_s in df_display.columns:
+        fig.add_trace(go.Scatter(x=df_display.index, y=df_display[sma_s], name=f'SMA {MA_SHORT}',
+                                  line=dict(color='orange', width=1.5)), row=1, col=1)
+    if sma_l in df_display.columns:
+        fig.add_trace(go.Scatter(x=df_display.index, y=df_display[sma_l], name=f'SMA {MA_LONG}',
+                                  line=dict(color='#ff69b4', width=1.5)), row=1, col=1)
+
+    # VWAP overlay
+    if show_vwap:
+        vwap_series = compute_vwap(df_display)
+        fig.add_trace(go.Scatter(x=df_display.index, y=vwap_series, name='VWAP',
+                                  line=dict(color='#ffeb3b', width=1.5, dash='dot')), row=1, col=1)
+
+    # Keltner Channels
+    if show_keltner:
+        k_u, k_m, k_l = compute_keltner_channels(df_display)
+        fig.add_trace(go.Scatter(x=df_display.index, y=k_u, name='Keltner Upper',
+                                  line=dict(color='rgba(255,152,0,0.5)', width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_display.index, y=k_l, name='Keltner Lower',
+                                  line=dict(color='rgba(255,152,0,0.5)', width=1),
+                                  fill='tonexty', fillcolor='rgba(255,152,0,0.05)'), row=1, col=1)
+
+    # ATR Stop
+    if show_atr_stop:
+        atr_stop = compute_atr_stops(df_display)
+        fig.add_trace(go.Scatter(x=df_display.index, y=atr_stop, name='ATR Stop',
+                                  line=dict(color='#ef5350', width=1, dash='dot')), row=1, col=1)
+
+    # Fractal S/R levels
+    if show_fractal_sr and fractal_levels:
+        for _, level in fractal_levels.get('support_levels', [])[:3]:
+            fig.add_hline(y=level, line=dict(color='#26a69a', width=1, dash='dash'),
+                          annotation_text=f'S ${level:.0f}', annotation_position='left', row=1, col=1)
+        for _, level in fractal_levels.get('resistance_levels', [])[:3]:
+            fig.add_hline(y=level, line=dict(color='#ef5350', width=1, dash='dash'),
+                          annotation_text=f'R ${level:.0f}', annotation_position='left', row=1, col=1)
+
+    # Anchored VWAP
+    if show_anchored_vwap:
+        events = find_anchor_events(df_full)
+        avwap_colors = ['#00bcd4', '#ff5722', '#8bc34a', '#e91e63', '#9c27b0']
+        for i, evt in enumerate(events[:3]):
+            avwap = compute_anchored_vwap(df_display, evt['date'])
+            fig.add_trace(go.Scatter(
+                x=df_display.index, y=avwap,
+                name=f"AVWAP {evt['event']}",
+                line=dict(color=avwap_colors[i % len(avwap_colors)], width=1, dash='dashdot'),
+            ), row=1, col=1)
+
+    # Volume Profile (horizontal bars)
+    if show_vol_profile:
+        vp = compute_volume_profile(df_display)
+        if vp['volumes']:
+            max_vol = max(vp['volumes']) if max(vp['volumes']) > 0 else 1
+            # Scale bar widths to ~20% of the price chart x-range
+            fig.add_trace(go.Bar(
+                y=vp['bin_centers'], x=[v / max_vol * 0.3 for v in vp['volumes']],
+                orientation='h', name='Volume Profile', opacity=0.15,
+                marker_color='#42a5f5', showlegend=False,
+                xaxis='x2',
+            ), row=1, col=1)
+            # POC line
+            fig.add_hline(y=vp['poc'], line=dict(color='#42a5f5', width=1, dash='dot'),
+                          annotation_text=f"POC ${vp['poc']:.0f}", annotation_position='right', row=1, col=1)
+
+    # Entry/Exit markers
+    if show_entries:
+        try:
+            from backtest import _get_strategy_fn
+            sig_fn, sig_col, defaults = _get_strategy_fn(chart_strategy)
+            df_signals = sig_fn(df_full.copy(), **defaults)
+            if sig_col == 'ma_signal' and 'ma_signal' in df_signals.columns:
+                df_signals['strategy_signal'] = df_signals['ma_signal']
+                sig_col = 'strategy_signal'
+            df_sig_display = filter_df(df_signals, range_start, range_end)
+            buys = df_sig_display[df_sig_display[sig_col] == 1]
+            sells = df_sig_display[df_sig_display[sig_col] == -1]
+            if not buys.empty:
+                fig.add_trace(go.Scatter(
+                    x=buys.index, y=buys['Low'] * 0.995, mode='markers', name='BUY',
+                    marker=dict(symbol='triangle-up', color='#00e676', size=12, line=dict(width=1, color='white')),
+                ), row=1, col=1)
+            if not sells.empty:
+                fig.add_trace(go.Scatter(
+                    x=sells.index, y=sells['High'] * 1.005, mode='markers', name='SELL',
+                    marker=dict(symbol='triangle-down', color='#ff1744', size=12, line=dict(width=1, color='white')),
+                ), row=1, col=1)
+        except Exception:
+            pass
+
+    # Volume subplot
+    if 'Volume' in df_display.columns:
+        vol_colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df_display['Close'], df_display['Open'])]
+        fig.add_trace(go.Bar(x=df_display.index, y=df_display['Volume'],
+                              marker_color=vol_colors, name='Volume', showlegend=False), row=2, col=1)
+
+    # RSI subplot
+    if 'RSI' in df_display.columns:
+        fig.add_trace(go.Scatter(x=df_display.index, y=df_display['RSI'], name='RSI',
+                                  line=dict(color='#9c27b0', width=1.5)), row=3, col=1)
+        for level, color, label in [(30, '#26a69a', 'Oversold'), (70, '#ef5350', 'Overbought')]:
+            fig.add_hline(y=level, line=dict(color=color, width=1, dash='dash'),
+                          row=3, col=1, annotation_text=label, annotation_position='right')
+
+    # Z-Score subplot
+    if show_zscore:
+        zs = compute_zscore(df_display)
+        fig.add_trace(go.Scatter(x=df_display.index, y=zs, name='Z-Score',
+                                  line=dict(color='#29b6f6', width=1.5)), row=4, col=1)
+        fig.add_hline(y=-2, line=dict(color='#26a69a', width=1, dash='dash'), row=4, col=1,
+                      annotation_text='Buy (-2)', annotation_position='right')
+        fig.add_hline(y=2, line=dict(color='#ef5350', width=1, dash='dash'), row=4, col=1,
+                      annotation_text='Sell (+2)', annotation_position='right')
+        fig.add_hline(y=0, line=dict(color='#666', width=0.5), row=4, col=1)
+
+    fig.update_layout(
+        height=750 + (100 if show_zscore else 0),
+        xaxis_rangeslider_visible=False,
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        margin=dict(t=50, b=20, l=0, r=80),
+        paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
+        font=dict(color='#fafafa'),
+    )
+    fig.update_xaxes(gridcolor='#1e2130', showgrid=True)
+    fig.update_yaxes(gridcolor='#1e2130', showgrid=True)
+    fig.update_yaxes(range=[0, 100], row=3, col=1)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Volume Profile Key Levels ─────────────────────────────────────────
+    if show_vol_profile:
+        vp = compute_volume_profile(df_display)
+        vp1, vp2, vp3 = st.columns(3)
+        vp1.metric('Point of Control', f"${vp['poc']:.2f}")
+        vp2.metric('Value Area Low', f"${vp['val']:.2f}")
+        vp3.metric('Value Area High', f"${vp['vah']:.2f}")
 
     # ── Raw data ───────────────────────────────────────────────────────────
     with st.expander('Raw data (last 30 rows)'):
@@ -795,11 +1087,192 @@ elif page == '🔁 Backtest':
         eq_fig.update_yaxes(gridcolor='#1e2130')
         st.plotly_chart(eq_fig)
 
-        # ── Per-ticker / per-strategy trade logs ───────────────────────────
-        st.subheader('Trade Logs')
+        # ── Advanced Metrics ──────────────────────────────────────────────
+        from backtest import compute_advanced_metrics, monte_carlo_simulation
+        from config import MC_SIMULATIONS
+
+        st.subheader('Advanced Metrics')
+        adv_rows = []
         for r in all_results:
-            label = f"{r.get('ticker','')}  ·  {r.get('strategy', selected_strategy)}  —  {r['num_trades']} trade(s)"
-            with st.expander(label):
+            adv = compute_advanced_metrics(r)
+            adv_rows.append({
+                'Ticker': r.get('ticker', ''),
+                'Strategy': r.get('strategy', ''),
+                'Expectancy': f"{adv['expectancy']:+.2f}%",
+                'Payoff Ratio': f"{adv['payoff_ratio']:.2f}",
+                'Recovery Factor': f"{adv['recovery_factor']:.2f}",
+                'Max DD Duration': f"{adv['max_dd_duration_days']}d",
+                'Half-Kelly %': f"{adv['kelly_fraction']*100:.1f}%",
+                'Avg Win': f"{adv['avg_win_pct']:+.2f}%",
+                'Avg Loss': f"-{adv['avg_loss_pct']:.2f}%",
+            })
+        st.dataframe(pd.DataFrame(adv_rows))
+
+        # ── Drawdown Analysis ────────────────────────────────────────────
+        st.subheader('Drawdown Analysis')
+        dd_fig = go.Figure()
+        for i, r in enumerate(all_results):
+            eq = np.array(r['equity_values'], dtype=float)
+            if len(eq) < 2:
+                continue
+            peak = np.maximum.accumulate(eq)
+            drawdown = (eq - peak) / peak * 100
+            c = palette[i % len(palette)]
+            dd_fig.add_trace(go.Scatter(
+                x=r['equity_dates'], y=drawdown,
+                fill='tozeroy', fillcolor=f'rgba({int(c[1:3],16)},{int(c[3:5],16)},{int(c[5:7],16)},0.2)',
+                line=dict(color=c, width=1),
+                name=f"{r.get('ticker','')} {r.get('strategy','')}",
+            ))
+        dd_fig.update_layout(
+            height=300, margin=dict(t=30, b=20, l=0, r=20),
+            paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
+            font=dict(color='#fafafa'), yaxis_title='Drawdown (%)',
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        )
+        dd_fig.update_xaxes(gridcolor='#1e2130')
+        dd_fig.update_yaxes(gridcolor='#1e2130')
+        st.plotly_chart(dd_fig, use_container_width=True)
+
+        # ── Trade P&L Distribution + Monthly Returns ─────────────────────
+        dist_col, heat_col = st.columns(2)
+
+        with dist_col:
+            st.subheader('Trade P&L Distribution')
+            all_pnl = []
+            for r in all_results:
+                all_pnl.extend([t['pnl_pct'] for t in r['trades'] if t['type'] == 'sell'])
+            if all_pnl:
+                colors = ['#26a69a' if p > 0 else '#ef5350' for p in all_pnl]
+                hist_fig = go.Figure(go.Histogram(x=all_pnl, nbinsx=25, marker_color='#42a5f5'))
+                hist_fig.add_vline(x=0, line=dict(color='white', width=1, dash='dash'))
+                hist_fig.update_layout(
+                    height=300, margin=dict(t=30, b=20, l=0, r=20),
+                    paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
+                    font=dict(color='#fafafa'), xaxis_title='P&L (%)', yaxis_title='Count',
+                )
+                hist_fig.update_xaxes(gridcolor='#1e2130')
+                hist_fig.update_yaxes(gridcolor='#1e2130')
+                st.plotly_chart(hist_fig, use_container_width=True)
+            else:
+                st.info('No completed trades to display.')
+
+        with heat_col:
+            st.subheader('Monthly Returns')
+            # Use first result for heatmap
+            r0 = all_results[0]
+            eq_s = pd.Series(r0['equity_values'], index=pd.DatetimeIndex(r0['equity_dates']))
+            monthly = eq_s.resample('ME').last().pct_change().dropna() * 100
+            if len(monthly) >= 3:
+                hm_data = pd.DataFrame({
+                    'Year': monthly.index.year,
+                    'Month': monthly.index.month,
+                    'Return': monthly.values,
+                })
+                pivot = hm_data.pivot_table(index='Year', columns='Month', values='Return', aggfunc='sum')
+                month_names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+                pivot.columns = [month_names[m-1] for m in pivot.columns]
+                hm_fig = go.Figure(go.Heatmap(
+                    z=pivot.values, x=list(pivot.columns), y=[str(y) for y in pivot.index],
+                    colorscale='RdYlGn', zmid=0,
+                    text=[[f'{v:.1f}%' if not np.isnan(v) else '' for v in row] for row in pivot.values],
+                    texttemplate='%{text}', textfont=dict(size=10),
+                ))
+                hm_fig.update_layout(
+                    height=300, margin=dict(t=30, b=20, l=0, r=20),
+                    paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
+                    font=dict(color='#fafafa'),
+                )
+                st.plotly_chart(hm_fig, use_container_width=True)
+            else:
+                st.info('Need at least 3 months of data for heatmap.')
+
+        # ── Rolling Sharpe ────────────────────────────────────────────────
+        with st.expander('Rolling Sharpe Ratio (63-day)'):
+            rs_fig = go.Figure()
+            for i, r in enumerate(all_results):
+                eq = pd.Series(r['equity_values'], index=pd.DatetimeIndex(r['equity_dates']))
+                daily_ret = eq.pct_change()
+                rolling_sharpe = daily_ret.rolling(63).mean() / daily_ret.rolling(63).std() * np.sqrt(252)
+                c = palette[i % len(palette)]
+                rs_fig.add_trace(go.Scatter(
+                    x=rolling_sharpe.index, y=rolling_sharpe,
+                    name=f"{r.get('ticker','')} {r.get('strategy','')}",
+                    line=dict(color=c, width=1.5),
+                ))
+            rs_fig.add_hline(y=0, line=dict(color='#666', width=0.5))
+            rs_fig.update_layout(
+                height=300, margin=dict(t=30, b=20, l=0, r=20),
+                paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
+                font=dict(color='#fafafa'), yaxis_title='Sharpe Ratio',
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+            )
+            rs_fig.update_xaxes(gridcolor='#1e2130')
+            rs_fig.update_yaxes(gridcolor='#1e2130')
+            st.plotly_chart(rs_fig, use_container_width=True)
+
+        # ── Monte Carlo ───────────────────────────────────────────────────
+        with st.expander('Monte Carlo Analysis'):
+            for r in all_results:
+                if r['num_trades'] < 3:
+                    st.info(f"{r.get('ticker','')} {r.get('strategy','')}: Need 3+ trades for Monte Carlo.")
+                    continue
+                mc = monte_carlo_simulation(r['trades'], n_simulations=MC_SIMULATIONS,
+                                             initial_capital=float(initial_capital))
+                if mc:
+                    st.markdown(f"**{r.get('ticker','')} · {r.get('strategy','')}** ({MC_SIMULATIONS} simulations)")
+                    mc1, mc2, mc3 = st.columns(3)
+                    mc1.metric('Median Return', f"{mc['median_return']:+.2f}%")
+                    mc2.metric('5th-95th Return', f"{mc['p5_return']:+.1f}% to {mc['p95_return']:+.1f}%")
+                    mc3.metric('Worst-Case Max DD', f"{mc['p95_max_dd']:.1f}%")
+                    mc_fig = go.Figure(go.Histogram(
+                        x=mc['final_values'], nbinsx=50, marker_color='#42a5f5',
+                    ))
+                    mc_fig.add_vline(x=float(initial_capital), line=dict(color='white', width=1, dash='dash'),
+                                     annotation_text='Starting Capital')
+                    mc_fig.update_layout(
+                        height=250, margin=dict(t=30, b=20, l=0, r=20),
+                        paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
+                        font=dict(color='#fafafa'), xaxis_title='Final Portfolio Value ($)',
+                    )
+                    mc_fig.update_xaxes(gridcolor='#1e2130')
+                    mc_fig.update_yaxes(gridcolor='#1e2130')
+                    st.plotly_chart(mc_fig, use_container_width=True)
+
+        # ── Walk-Forward Validation ───────────────────────────────────────
+        with st.expander('Walk-Forward Validation'):
+            st.caption('Tests if strategy parameters are overfit by validating on unseen data.')
+            wf_ticker = st.text_input('Ticker for walk-forward', value=tickers[0], key='wf_ticker')
+            wf_strat = st.selectbox('Strategy', STRATEGIES, key='wf_strat',
+                                     index=STRATEGIES.index(selected_strategy))
+            if st.button('Run Walk-Forward', key='wf_btn'):
+                with st.spinner('Running walk-forward analysis (8 folds)...'):
+                    from walk_forward import walk_forward_test
+                    wf = walk_forward_test(wf_ticker, wf_strat)
+                if 'error' in wf:
+                    st.error(wf['error'])
+                else:
+                    wf1, wf2, wf3 = st.columns(3)
+                    wf1.metric('Avg Train Sharpe', f"{wf['avg_train_sharpe']:.3f}")
+                    wf2.metric('Avg Test Sharpe', f"{wf['avg_test_sharpe']:.3f}")
+                    wf3.metric('OOS Win Rate', f"{wf['oos_win_rate']:.1f}%")
+
+                    overfit = wf['overfit_ratio']
+                    if overfit < 1.5:
+                        st.success(f"Overfit Ratio: {overfit:.2f}x — Strategy appears robust")
+                    elif overfit < 2.5:
+                        st.warning(f"Overfit Ratio: {overfit:.2f}x — Moderate overfit risk")
+                    else:
+                        st.error(f"Overfit Ratio: {overfit:.2f}x — Likely overfit")
+
+                    folds_df = pd.DataFrame(wf['folds'])
+                    st.dataframe(folds_df[['fold','train_sharpe','test_sharpe','test_win_rate','test_return','test_trades']])
+
+        # ── Per-ticker / per-strategy trade logs ───────────────────────────
+        with st.expander('Trade Logs'):
+            for r in all_results:
+                label = f"{r.get('ticker','')}  ·  {r.get('strategy', selected_strategy)}  —  {r['num_trades']} trade(s)"
+                st.markdown(f"**{label}**")
                 if not r['trades']:
                     st.info('No trades in this range.')
                     continue
