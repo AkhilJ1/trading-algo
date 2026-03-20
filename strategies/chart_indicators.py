@@ -236,7 +236,7 @@ def compute_confluence_signals(df: pd.DataFrame, fractal_levels: dict = None) ->
     vol_surge = df['Volume'] > 1.5 * vol_avg
     bar_dir = np.sign(df['Close'] - df['Open'])  # +1 up, -1 down
     result['vol_surge'] = vol_surge
-    result['signal_score'] += (vol_surge.astype(int) * bar_dir).astype(int)
+    result['signal_score'] += (vol_surge.astype(int) * bar_dir).fillna(0).astype(int)
 
     # Label
     labels = []
@@ -331,4 +331,331 @@ def compute_multi_factor_score(df: pd.DataFrame) -> dict:
         'volume_surge': volume_surge,
         'regime': regime,
         'atr_state': atr_state,
+    }
+
+
+# ── Sell Signal Detection ────────────────────────────────────────────────
+
+def compute_sell_signals(df: pd.DataFrame) -> dict:
+    """
+    Detect overbought / sell conditions — mirror of buy signal detection.
+    Returns dict with sell_signal (bool), strength (0-100), and component details.
+    """
+    if len(df) < 60:
+        return {'sell_signal': False, 'sell_strength': 0, 'components': {},
+                'rsi': 50, 'zscore': 0}
+
+    from strategies.rsi_bollinger import calculate_rsi
+
+    close = df['Close']
+    rsi = calculate_rsi(df)
+    zscore = compute_zscore(df)
+    k_upper, _, _ = compute_keltner_channels(df)
+
+    # Bollinger upper
+    bb_mid = close.rolling(20).mean()
+    bb_std = close.rolling(20).std()
+    bb_upper = bb_mid + 2.0 * bb_std
+
+    current_rsi = float(rsi.iloc[-1]) if not rsi.empty else 50
+    current_z = float(zscore.iloc[-1]) if not zscore.dropna().empty else 0
+    current_close = float(close.iloc[-1])
+    current_k_upper = float(k_upper.iloc[-1]) if not k_upper.dropna().empty else float('inf')
+    current_bb_upper = float(bb_upper.iloc[-1]) if not bb_upper.dropna().empty else float('inf')
+
+    components = {
+        'rsi_overbought': current_rsi > 70,
+        'zscore_extended': current_z > 2.0,
+        'above_keltner': current_close >= current_k_upper,
+        'above_bb_upper': current_close >= current_bb_upper,
+    }
+
+    # Count how many sell conditions are active
+    active = sum(components.values())
+    sell_signal = active >= 2  # Need at least 2 conditions for a sell signal
+
+    # Strength: weighted scoring (0-100)
+    strength = 0.0
+    if components['rsi_overbought']:
+        strength += min(30, (current_rsi - 70) * 30 / 30)  # 0-30 pts
+    if components['zscore_extended']:
+        strength += min(30, (current_z - 2.0) * 15)  # 0-30 pts
+    if components['above_keltner']:
+        strength += 20
+    if components['above_bb_upper']:
+        strength += 20
+    strength = min(100, strength)
+
+    return {
+        'sell_signal': sell_signal,
+        'sell_strength': round(strength, 1),
+        'components': components,
+        'active_count': active,
+        'rsi': round(current_rsi, 1),
+        'zscore': round(current_z, 2),
+        'bb_upper': round(current_bb_upper, 2),
+        'keltner_upper': round(current_k_upper, 2),
+    }
+
+
+# ── Opportunity Scanner ──────────────────────────────────────────────────
+
+def compute_opportunity_scan(df: pd.DataFrame) -> list:
+    """
+    Scan for actionable setups regardless of direction.
+    Returns list of opportunity dicts with tier, direction, confidence, and reason.
+    """
+    if len(df) < 60:
+        return []
+
+    from strategies.rsi_bollinger import calculate_rsi
+    from strategies.fractal_indicators import calculate_fractal_dimension, classify_regime
+
+    close = df['Close']
+    rsi = calculate_rsi(df)
+    zscore = compute_zscore(df)
+    atr = _compute_atr(df, 14)
+
+    current_rsi = float(rsi.iloc[-1]) if not rsi.empty else 50
+    current_z = float(zscore.iloc[-1]) if not zscore.dropna().empty else 0
+    current_close = float(close.iloc[-1])
+    current_vol = float(df['Volume'].iloc[-1])
+    avg_vol = float(df['Volume'].rolling(20).mean().iloc[-1]) if len(df) >= 20 else current_vol
+    vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
+
+    # Regime
+    fd_series = calculate_fractal_dimension(df)
+    current_fd = float(fd_series.dropna().iloc[-1]) if not fd_series.dropna().empty else 1.5
+    regime = classify_regime(current_fd)
+
+    # ATR ratio
+    atr_60_avg = float(atr.rolling(60).mean().iloc[-1]) if len(atr.dropna()) >= 60 else float(atr.dropna().iloc[-1]) if not atr.dropna().empty else 1
+    current_atr = float(atr.iloc[-1]) if not atr.dropna().empty else 1
+    atr_ratio = current_atr / atr_60_avg if atr_60_avg > 0 else 1.0
+
+    # Bollinger bandwidth
+    bb_mid = close.rolling(20).mean()
+    bb_std = close.rolling(20).std()
+    bb_bandwidth = (bb_std * 4) / bb_mid  # Total band width as % of price
+    current_bw = float(bb_bandwidth.iloc[-1]) if not bb_bandwidth.dropna().empty else 0
+    bw_20_min = float(bb_bandwidth.rolling(20).min().iloc[-1]) if len(bb_bandwidth.dropna()) >= 20 else current_bw
+
+    # SMA 50/200
+    sma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else current_close
+    sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else current_close
+
+    opportunities = []
+
+    # ── Tier 1: Proven (Statistical) ──────────────────────────────────
+
+    # Z-Score approaching extreme (mean reversion setup)
+    if current_z <= -1.5:
+        conf = min(90, 50 + abs(current_z) * 20)
+        opportunities.append({
+            'setup': 'Z-Score Mean Reversion',
+            'direction': 'long',
+            'tier': 1,
+            'confidence': round(conf),
+            'reason': f'Z-Score at {current_z:.2f} — statistically mean-reverting (< -1.5σ)',
+        })
+    elif current_z >= 1.5:
+        conf = min(90, 50 + abs(current_z) * 20)
+        opportunities.append({
+            'setup': 'Z-Score Mean Reversion',
+            'direction': 'short',
+            'tier': 1,
+            'confidence': round(conf),
+            'reason': f'Z-Score at {current_z:+.2f} — statistically extended (> +1.5σ)',
+        })
+
+    # RSI approaching extreme
+    if 30 <= current_rsi <= 35:
+        opportunities.append({
+            'setup': 'RSI Approaching Oversold',
+            'direction': 'long',
+            'tier': 1,
+            'confidence': round(60 + (35 - current_rsi) * 6),
+            'reason': f'RSI at {current_rsi:.1f} — approaching oversold threshold (< 30)',
+        })
+    elif 65 <= current_rsi <= 70:
+        opportunities.append({
+            'setup': 'RSI Approaching Overbought',
+            'direction': 'short',
+            'tier': 1,
+            'confidence': round(60 + (current_rsi - 65) * 6),
+            'reason': f'RSI at {current_rsi:.1f} — approaching overbought threshold (> 70)',
+        })
+
+    # Bollinger Band squeeze (BB bandwidth at 20-bar low)
+    if current_bw > 0 and current_bw <= bw_20_min * 1.05:
+        opportunities.append({
+            'setup': 'Bollinger Squeeze',
+            'direction': 'long' if current_z < 0 else 'short',
+            'tier': 1,
+            'confidence': 65,
+            'reason': 'BB bandwidth at 20-bar low — volatility compression precedes expansion',
+        })
+
+    # ── Tier 2: Validated (Backtested) ────────────────────────────────
+
+    # Momentum setup: trending regime + above key MAs
+    if regime == 'trending' and current_close > sma50 > sma200:
+        opportunities.append({
+            'setup': 'Trend Continuation',
+            'direction': 'long',
+            'tier': 2,
+            'confidence': 70,
+            'reason': f'Trending regime (FD={current_fd:.2f}) with price above SMA50/200 — momentum favored',
+        })
+    elif regime == 'trending' and current_close < sma50 < sma200:
+        opportunities.append({
+            'setup': 'Trend Continuation',
+            'direction': 'short',
+            'tier': 2,
+            'confidence': 70,
+            'reason': f'Trending regime (FD={current_fd:.2f}) with price below SMA50/200 — downtrend continuation',
+        })
+
+    # Volume-confirmed breakout/breakdown
+    if vol_ratio > 1.5:
+        pct_change = (current_close - float(close.iloc[-2])) / float(close.iloc[-2]) * 100
+        if pct_change > 0.5:
+            opportunities.append({
+                'setup': 'Volume Breakout',
+                'direction': 'long',
+                'tier': 2,
+                'confidence': round(55 + min(20, vol_ratio * 5)),
+                'reason': f'Price up {pct_change:+.1f}% on {vol_ratio:.1f}x avg volume — volume-confirmed move',
+            })
+        elif pct_change < -0.5:
+            opportunities.append({
+                'setup': 'Volume Breakdown',
+                'direction': 'short',
+                'tier': 2,
+                'confidence': round(55 + min(20, vol_ratio * 5)),
+                'reason': f'Price down {pct_change:+.1f}% on {vol_ratio:.1f}x avg volume — volume-confirmed move',
+            })
+
+    # ATR contraction (coiled spring)
+    if atr_ratio < 0.7:
+        opportunities.append({
+            'setup': 'ATR Contraction (Coiled Spring)',
+            'direction': 'long' if current_z < 0 else 'short',
+            'tier': 2,
+            'confidence': 60,
+            'reason': f'ATR {atr_ratio:.0%} of 60-day avg — volatility compressed, breakout likely',
+        })
+
+    # Mean reversion in choppy regime
+    if regime == 'choppy' and abs(current_z) > 1.0:
+        direction = 'long' if current_z < 0 else 'short'
+        opportunities.append({
+            'setup': 'Regime Mean Reversion',
+            'direction': direction,
+            'tier': 2,
+            'confidence': 65,
+            'reason': f'Choppy regime (FD={current_fd:.2f}) + Z-Score {current_z:+.2f} — mean reversion favored',
+        })
+
+    # ── Tier 3: Speculative ───────────────────────────────────────────
+
+    # SMA crossover proximity (within 1%)
+    if sma50 > 0 and sma200 > 0:
+        sma_diff = (sma50 - sma200) / sma200
+        if abs(sma_diff) < 0.01:
+            cross_type = 'Golden Cross' if sma50 > sma200 else 'Death Cross'
+            opportunities.append({
+                'setup': f'{cross_type} Imminent',
+                'direction': 'long' if sma50 > sma200 else 'short',
+                'tier': 3,
+                'confidence': 45,
+                'reason': f'SMA50/200 within 1% — {cross_type.lower()} forming',
+            })
+
+    # Sort by tier then confidence descending
+    opportunities.sort(key=lambda x: (x['tier'], -x['confidence']))
+    return opportunities
+
+
+# ── Strategy Consensus ───────────────────────────────────────────────────
+
+def compute_strategy_consensus(df: pd.DataFrame) -> dict:
+    """
+    Run all available strategies and return their latest signal.
+    Returns dict of strategy_name → signal (+1, -1, 0) and summary.
+    """
+    signals = {}
+
+    # 1. MA Crossover
+    try:
+        from strategies.ma_crossover import current_signal as ma_current_signal
+        ma = ma_current_signal(df)
+        signals['MA Cross'] = 1 if ma['trend'] == 'bullish' else -1
+    except Exception:
+        signals['MA Cross'] = 0
+
+    # 2. RSI + BB
+    try:
+        from strategies.rsi_bollinger import get_buy_signal
+        rsi_bb = get_buy_signal(df)
+        if rsi_bb['buy_signal']:
+            signals['RSI+BB'] = 1
+        elif rsi_bb['rsi'] > 70:
+            signals['RSI+BB'] = -1
+        else:
+            signals['RSI+BB'] = 0
+    except Exception:
+        signals['RSI+BB'] = 0
+
+    # 3. MACD + RSI
+    try:
+        from strategies.macd_rsi import generate_signals
+        sig_df = generate_signals(df)
+        signals['MACD+RSI'] = int(sig_df['strategy_signal'].iloc[-1])
+    except Exception:
+        signals['MACD+RSI'] = 0
+
+    # 4. BB Squeeze
+    try:
+        from strategies.bb_squeeze import generate_signals
+        sig_df = generate_signals(df)
+        signals['BB Squeeze'] = int(sig_df['strategy_signal'].iloc[-1])
+    except Exception:
+        signals['BB Squeeze'] = 0
+
+    # 5. TSMOM
+    try:
+        from strategies.tsmom import generate_signals
+        sig_df = generate_signals(df)
+        signals['TSMOM'] = int(sig_df['strategy_signal'].iloc[-1])
+    except Exception:
+        signals['TSMOM'] = 0
+
+    # 6. Turtle
+    try:
+        from strategies.turtle import generate_signals
+        sig_df = generate_signals(df)
+        signals['Turtle'] = int(sig_df['strategy_signal'].iloc[-1])
+    except Exception:
+        signals['Turtle'] = 0
+
+    # Summary
+    bullish = sum(1 for v in signals.values() if v > 0)
+    bearish = sum(1 for v in signals.values() if v < 0)
+    total = len(signals)
+
+    if bullish >= 3:
+        consensus = 'bullish'
+    elif bearish >= 3:
+        consensus = 'bearish'
+    else:
+        consensus = 'mixed'
+
+    return {
+        'signals': signals,
+        'bullish_count': bullish,
+        'bearish_count': bearish,
+        'neutral_count': total - bullish - bearish,
+        'consensus': consensus,
+        'total': total,
     }

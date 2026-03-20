@@ -92,6 +92,51 @@ def scan_ticker_enhanced(ticker: str) -> Optional[dict]:
     return base
 
 
+def scan_ticker_full(ticker: str) -> Optional[dict]:
+    """
+    Full scan: buy signals + sell signals + opportunities + strategy consensus.
+    Returns None if data is unavailable.
+    """
+    base = scan_ticker_enhanced(ticker)
+    if base is None:
+        return None
+
+    try:
+        from strategies.chart_indicators import (
+            compute_sell_signals,
+            compute_opportunity_scan,
+            compute_strategy_consensus,
+        )
+        df = fetch_stock_data(ticker)
+        if df.empty:
+            return base
+
+        # Sell signals
+        sell = compute_sell_signals(df)
+        base.update({
+            'sell_signal': sell['sell_signal'],
+            'sell_strength': sell['sell_strength'],
+            'sell_components': sell['components'],
+            'sell_active_count': sell['active_count'],
+        })
+
+        # Opportunities
+        base['opportunities'] = compute_opportunity_scan(df)
+
+        # Strategy consensus
+        base['consensus'] = compute_strategy_consensus(df)
+
+    except Exception:
+        base.setdefault('sell_signal', False)
+        base.setdefault('sell_strength', 0)
+        base.setdefault('sell_components', {})
+        base.setdefault('sell_active_count', 0)
+        base.setdefault('opportunities', [])
+        base.setdefault('consensus', None)
+
+    return base
+
+
 def run_scanner(watchlist: list = WATCHLIST) -> list:
     width = 62
     print(f"\n{'='*width}")

@@ -255,22 +255,24 @@ def build_chart(df: pd.DataFrame, ticker: str, chart_type: str = 'Candlestick') 
 # Shared scanner helpers
 # ===========================================================================
 def _run_scan(tickers: list) -> dict:
-    """Scan a list of tickers with multi-factor scoring; return {buy, watch, all, errors} dict."""
-    from scanner import scan_ticker_enhanced
-    buy, watch, all_results, errors = [], [], [], []
+    """Scan a list of tickers with full signal detection; return {buy, sell, watch, opportunities, all, errors} dict."""
+    from scanner import scan_ticker_full
+    buy, sell, watch, all_results, errors = [], [], [], [], []
     status = st.empty()
     bar = st.progress(0)
     for i, ticker in enumerate(tickers):
         status.text(f'Scanning {ticker}… ({i+1}/{len(tickers)})')
         bar.progress((i + 1) / len(tickers))
         try:
-            result = scan_ticker_enhanced(ticker)
+            result = scan_ticker_full(ticker)
             if result is None:
                 errors.append((ticker, 'Insufficient data'))
             else:
                 all_results.append(result)
                 if result['buy_signal']:
                     buy.append(result)
+                elif result.get('sell_signal'):
+                    sell.append(result)
                 elif result['rsi_oversold']:
                     watch.append(result)
         except Exception as e:
@@ -278,25 +280,53 @@ def _run_scan(tickers: list) -> dict:
     status.empty()
     bar.empty()
     buy.sort(key=lambda x: x.get('composite_score', x['strength']), reverse=True)
+    sell.sort(key=lambda x: x.get('sell_strength', 0), reverse=True)
     watch.sort(key=lambda x: x['rsi'])
     all_results.sort(key=lambda x: x.get('composite_score', 0), reverse=True)
-    return {'buy': buy, 'watch': watch, 'all': all_results, 'errors': errors}
+
+    # Collect all opportunities across tickers
+    all_opps = []
+    for r in all_results:
+        for opp in r.get('opportunities', []):
+            opp['ticker'] = r['ticker']
+            opp['price'] = r['price']
+            all_opps.append(opp)
+    all_opps.sort(key=lambda x: (x['tier'], -x['confidence']))
+
+    return {'buy': buy, 'sell': sell, 'watch': watch, 'opportunities': all_opps,
+            'all': all_results, 'errors': errors}
+
+
+def _tier_badge(tier: int) -> str:
+    """Return HTML badge for signal confidence tier."""
+    if tier == 1:
+        return '<span style="background:#1b5e20;color:#a5d6a7;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;">PROVEN</span>'
+    elif tier == 2:
+        return '<span style="background:#e65100;color:#ffcc80;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;">VALIDATED</span>'
+    else:
+        return '<span style="background:#424242;color:#bdbdbd;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;">SPECULATIVE</span>'
 
 
 def _render_scan_results(results: dict, total: int) -> None:
-    """Render buy signals, watch list, factor breakdown, and errors."""
-    buy_signals = results['buy']
-    watch_only  = results['watch']
-    all_results = results.get('all', [])
-    errors      = results['errors']
+    """Render buy signals, sell signals, opportunities, consensus, watch list, and errors."""
+    buy_signals   = results['buy']
+    sell_signals  = results.get('sell', [])
+    watch_only    = results['watch']
+    opportunities = results.get('opportunities', [])
+    all_results   = results.get('all', [])
+    errors        = results['errors']
 
-    c1, c2, c3, c4 = st.columns(4)
+    # ── Summary metrics ───────────────────────────────────────────────
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric('Scanned', total)
     c2.metric('Buy Signals', len(buy_signals))
-    c3.metric('Watching', len(watch_only))
-    c4.metric('Errors', len(errors))
+    c3.metric('Sell Signals', len(sell_signals))
+    c4.metric('Opportunities', len(opportunities))
+    c5.metric('Watching', len(watch_only))
+    c6.metric('Errors', len(errors))
     st.markdown('---')
 
+    # ── BUY SIGNALS ───────────────────────────────────────────────────
     if buy_signals:
         st.subheader('Buy Signals')
         for sig in buy_signals:
@@ -312,13 +342,13 @@ def _render_scan_results(results: dict, total: int) -> None:
                 f"**{sig['ticker']}**  —  ${sig['price']:.2f}  |  Score {composite:.0f}/100",
                 expanded=True,
             ):
+                st.markdown(_tier_badge(1) + '&nbsp; RSI + Bollinger Band buy signal', unsafe_allow_html=True)
                 r1c1, r1c2, r1c3, r1c4 = st.columns(4)
                 r1c1.metric('Price', f"${sig['price']:.2f}")
                 r1c2.metric('RSI', f"{sig['rsi']:.1f}")
                 r1c3.metric('Strength', f"{sig['strength']:.0f}/100")
                 r1c4.metric('Composite', f"{composite:.0f}/100")
                 if factors:
-                    # Factor dots
                     def _dot(val, label):
                         color = '#26a69a' if val > 0 else '#666'
                         return f'<span style="color:{color};font-weight:bold;">{label}</span>'
@@ -337,9 +367,104 @@ def _render_scan_results(results: dict, total: int) -> None:
                 )
                 if xo_str:
                     st.caption(xo_str)
-    else:
-        st.info('No full buy signals in this list.')
+                # Strategy consensus inline
+                cons = sig.get('consensus')
+                if cons:
+                    _render_consensus_inline(cons)
 
+    # ── SELL SIGNALS ──────────────────────────────────────────────────
+    if sell_signals:
+        st.subheader('Sell Signals')
+        for sig in sell_signals:
+            sell_str = sig.get('sell_strength', 0)
+            comps = sig.get('sell_components', {})
+            with st.expander(
+                f"**{sig['ticker']}**  —  ${sig['price']:.2f}  |  Sell Strength {sell_str:.0f}/100",
+                expanded=True,
+            ):
+                # Determine tier based on active count
+                tier = 1 if sig.get('sell_active_count', 0) >= 3 else 2
+                st.markdown(_tier_badge(tier) + '&nbsp; Overbought / sell signal', unsafe_allow_html=True)
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                sc1.metric('Price', f"${sig['price']:.2f}")
+                sc2.metric('RSI', f"{sig['rsi']:.1f}")
+                sc3.metric('Sell Strength', f"{sell_str:.0f}/100")
+                sc4.metric('Conditions Met', f"{sig.get('sell_active_count', 0)}/4")
+                # Component breakdown
+                comp_parts = []
+                if comps.get('rsi_overbought'):
+                    comp_parts.append('RSI > 70')
+                if comps.get('zscore_extended'):
+                    comp_parts.append('Z-Score > +2.0')
+                if comps.get('above_keltner'):
+                    comp_parts.append('Above Keltner Upper')
+                if comps.get('above_bb_upper'):
+                    comp_parts.append('Above BB Upper')
+                if comp_parts:
+                    st.markdown('**Active conditions:** ' + ' · '.join(comp_parts))
+                st.caption(f"MA Trend: {sig['ma_trend'].upper()}")
+                cons = sig.get('consensus')
+                if cons:
+                    _render_consensus_inline(cons)
+
+    # ── OPPORTUNITIES ─────────────────────────────────────────────────
+    if opportunities:
+        st.subheader('Opportunities')
+        st.caption('Actionable setups detected across your watchlist — grouped by confidence tier')
+
+        # Group by tier
+        tier_groups = {1: [], 2: [], 3: []}
+        for opp in opportunities:
+            tier_groups[opp['tier']].append(opp)
+
+        for tier_num, tier_label in [(1, 'Proven (Statistical Basis)'), (2, 'Validated (Backtested)'), (3, 'Speculative')]:
+            items = tier_groups[tier_num]
+            if not items:
+                continue
+            st.markdown(f"#### {tier_label}")
+            for opp in items:
+                dir_icon = '↑' if opp['direction'] == 'long' else '↓'
+                dir_color = '#26a69a' if opp['direction'] == 'long' else '#ef5350'
+                html = (
+                    f'<div style="background:#1a1f2e;padding:10px 14px;border-radius:6px;'
+                    f'border-left:3px solid {dir_color};margin:4px 0;">'
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;">'
+                    f'<div>'
+                    f'<span style="font-weight:bold;font-size:14px;color:#fafafa;">{opp["ticker"]}</span>'
+                    f'&nbsp;&nbsp;{_tier_badge(tier_num)}'
+                    f'&nbsp;&nbsp;<span style="color:{dir_color};font-weight:bold;">{dir_icon} {opp["direction"].upper()}</span>'
+                    f'&nbsp;&nbsp;<span style="color:#90caf9;font-size:13px;">{opp["setup"]}</span>'
+                    f'</div>'
+                    f'<div style="color:#fff;font-weight:bold;font-size:13px;">'
+                    f'${opp["price"]:.2f} &nbsp;|&nbsp; Confidence: {opp["confidence"]}%</div>'
+                    f'</div>'
+                    f'<div style="color:#aaa;font-size:12px;margin-top:4px;">{opp["reason"]}</div>'
+                    f'</div>'
+                )
+                st.markdown(html, unsafe_allow_html=True)
+    elif not buy_signals and not sell_signals:
+        st.info('No actionable signals or opportunities detected. All tickers are in neutral territory.')
+
+    # ── STRATEGY CONSENSUS ────────────────────────────────────────────
+    consensus_tickers = [r for r in all_results if r.get('consensus')]
+    if consensus_tickers:
+        with st.expander('Strategy Consensus (all tickers)', expanded=False):
+            st.caption('Latest signal from each strategy: +1 bullish, -1 bearish, 0 neutral')
+            cons_rows = []
+            for r in consensus_tickers:
+                cons = r['consensus']
+                row = {'Ticker': r['ticker']}
+                for strat, val in cons['signals'].items():
+                    row[strat] = val
+                row['Bullish'] = cons['bullish_count']
+                row['Bearish'] = cons['bearish_count']
+                row['Consensus'] = cons['consensus'].title()
+                cons_rows.append(row)
+            if cons_rows:
+                df_cons = pd.DataFrame(cons_rows)
+                st.dataframe(df_cons, use_container_width=True)
+
+    # ── WATCH LIST ────────────────────────────────────────────────────
     if watch_only:
         st.subheader('Watch — RSI Oversold, Awaiting BB Wick Touch')
         watch_data = []
@@ -357,9 +482,9 @@ def _render_scan_results(results: dict, total: int) -> None:
                 row['Z-Score'] = s['factors']['zscore']
                 row['Score'] = s.get('composite_score', 0)
             watch_data.append(row)
-        st.dataframe(pd.DataFrame(watch_data))
+        st.dataframe(pd.DataFrame(watch_data), use_container_width=True)
 
-    # Factor breakdown table (all scanned tickers)
+    # ── FACTOR BREAKDOWN ──────────────────────────────────────────────
     if all_results:
         with st.expander('Factor Breakdown (all scanned tickers)'):
             factor_rows = []
@@ -369,6 +494,7 @@ def _render_scan_results(results: dict, total: int) -> None:
                     'Ticker': r['ticker'],
                     'Price': f"${r['price']:.2f}",
                     'RSI': round(r['rsi'], 1),
+                    'Signal': 'BUY' if r['buy_signal'] else ('SELL' if r.get('sell_signal') else ('WATCH' if r['rsi_oversold'] else '—')),
                 }
                 if f:
                     row.update({
@@ -382,12 +508,34 @@ def _render_scan_results(results: dict, total: int) -> None:
                         'Composite': r.get('composite_score', 0),
                     })
                 factor_rows.append(row)
-            st.dataframe(pd.DataFrame(factor_rows))
+            st.dataframe(pd.DataFrame(factor_rows), use_container_width=True)
 
     if errors:
         with st.expander(f'Errors ({len(errors)})'):
             for ticker, err in errors:
                 st.warning(f'**{ticker}**: {err}')
+
+
+def _render_consensus_inline(cons: dict) -> None:
+    """Render strategy consensus as a compact inline display."""
+    signals = cons['signals']
+    parts = []
+    for strat, val in signals.items():
+        if val > 0:
+            parts.append(f'<span style="color:#26a69a;">+{strat}</span>')
+        elif val < 0:
+            parts.append(f'<span style="color:#ef5350;">-{strat}</span>')
+        else:
+            parts.append(f'<span style="color:#666;">{strat}</span>')
+    label = cons['consensus'].title()
+    color = '#26a69a' if label == 'Bullish' else '#ef5350' if label == 'Bearish' else '#90caf9'
+    st.markdown(
+        f'<div style="font-size:12px;margin-top:4px;">'
+        f'<span style="color:{color};font-weight:bold;">Consensus: {label}</span> '
+        f'({cons["bullish_count"]}B / {cons["bearish_count"]}S) &nbsp;|&nbsp; '
+        f'{" · ".join(parts)}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _candidate_card_html(r: dict) -> str:
@@ -421,7 +569,7 @@ def _candidate_card_html(r: dict) -> str:
 # ===========================================================================
 if page == '📡 Daily Scanner':
     st.title('📡 Daily Scanner')
-    st.caption(f'RSI < {RSI_OVERSOLD}  +  wick touching lower Bollinger Band (last {BB_WICK_LOOKBACK} candles)')
+    st.caption('Multi-factor scanner: buy signals, sell signals, and opportunities across your watchlist')
 
     # ── Session state ──────────────────────────────────────────────────────
     if 'dynamic_results' not in st.session_state:
