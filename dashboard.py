@@ -412,6 +412,21 @@ def _render_scan_results(results: dict, total: int) -> None:
         st.subheader('Opportunities')
         st.caption('Actionable setups detected across your watchlist — grouped by confidence tier')
 
+        # Detect conflicting signals per ticker
+        _opp_dirs = {}
+        for opp in opportunities:
+            _opp_dirs.setdefault(opp['ticker'], set()).add(opp['direction'])
+        conflicted_tickers = {t for t, dirs in _opp_dirs.items() if len(dirs) > 1}
+
+        if conflicted_tickers:
+            tickers_str = ', '.join(sorted(conflicted_tickers))
+            st.warning(
+                f"**Conflicting signals for {tickers_str}** — "
+                "different timeframes disagree. A short-term mean reversion (bounce) "
+                "can coexist with a longer-term downtrend. Higher-tier signals carry more weight; "
+                "consider your holding period when choosing which to act on."
+            )
+
         # Group by tier
         tier_groups = {1: [], 2: [], 3: []}
         for opp in opportunities:
@@ -425,6 +440,10 @@ def _render_scan_results(results: dict, total: int) -> None:
             for opp in items:
                 dir_icon = '↑' if opp['direction'] == 'long' else '↓'
                 dir_color = '#26a69a' if opp['direction'] == 'long' else '#ef5350'
+                # Conflict indicator
+                conflict_tag = ''
+                if opp['ticker'] in conflicted_tickers:
+                    conflict_tag = '&nbsp;&nbsp;<span style="color:#ffd600;font-size:11px;" title="This ticker has opposing signals at different timeframes">CONFLICTED</span>'
                 html = (
                     f'<div style="background:#1a1f2e;padding:10px 14px;border-radius:6px;'
                     f'border-left:3px solid {dir_color};margin:4px 0;">'
@@ -434,6 +453,7 @@ def _render_scan_results(results: dict, total: int) -> None:
                     f'&nbsp;&nbsp;{_tier_badge(tier_num)}'
                     f'&nbsp;&nbsp;<span style="color:{dir_color};font-weight:bold;">{dir_icon} {opp["direction"].upper()}</span>'
                     f'&nbsp;&nbsp;<span style="color:#90caf9;font-size:13px;">{opp["setup"]}</span>'
+                    f'{conflict_tag}'
                     f'</div>'
                     f'<div style="color:#fff;font-weight:bold;font-size:13px;">'
                     f'${opp["price"]:.2f} &nbsp;|&nbsp; Confidence: {opp["confidence"]}%</div>'
