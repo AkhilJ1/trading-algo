@@ -54,7 +54,7 @@ st.sidebar.markdown(
     """
     <style>
     section[data-testid="stSidebar"] div[role="radiogroup"] > label:first-of-type * {
-        color: #26a69a !important;
+        color: #ffffff !important;
     }
     </style>
     """,
@@ -598,7 +598,7 @@ def _candidate_card_html(r: dict) -> str:
 # PAGE 1: Daily Scanner
 # ===========================================================================
 if page == '📡 Daily Scanner':
-    st.markdown("<h1 style='color: #26a69a;'>📡 Daily Scanner</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='color: #ffffff;'>📡 Daily Scanner</h1>", unsafe_allow_html=True)
     st.caption('Multi-factor scanner: buy signals, sell signals, and opportunities across your watchlist')
 
     # ── Session state ──────────────────────────────────────────────────────
