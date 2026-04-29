@@ -50,6 +50,16 @@ page = st.sidebar.radio(
     "Navigate",
     ["📡 Daily Scanner", "📊 Stock Chart", "🔁 Backtest", "🔬 Fractal & Options"],
 )
+st.sidebar.markdown(
+    """
+    <style>
+    section[data-testid="stSidebar"] div[role="radiogroup"] > label:first-of-type * {
+        color: #26a69a !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 st.sidebar.markdown("---")
 st.sidebar.caption(f"Watchlist: {len(WATCHLIST)} tickers")
 st.sidebar.caption(f"Strategy: RSI<{RSI_OVERSOLD} + BB wick | MA({MA_SHORT}/{MA_LONG})")
@@ -588,7 +598,7 @@ def _candidate_card_html(r: dict) -> str:
 # PAGE 1: Daily Scanner
 # ===========================================================================
 if page == '📡 Daily Scanner':
-    st.title('📡 Daily Scanner')
+    st.markdown("<h1 style='color: #26a69a;'>📡 Daily Scanner</h1>", unsafe_allow_html=True)
     st.caption('Multi-factor scanner: buy signals, sell signals, and opportunities across your watchlist')
 
     # ── Session state ──────────────────────────────────────────────────────
