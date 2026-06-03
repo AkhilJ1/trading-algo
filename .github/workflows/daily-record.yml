@@ -52,11 +52,31 @@ jobs:
           GCP_SA: ${{ secrets.GCP_SERVICE_ACCOUNT }}
         run: printf '%s' "$GCP_SA" > "${{ github.workspace }}/gcp_sa.json"
 
+      - name: Write Schwab token (only if secret is configured)
+        env:
+          SCHWAB_TOKEN: ${{ secrets.SCHWAB_TOKEN }}
+        run: |
+          if [ -n "$SCHWAB_TOKEN" ]; then
+            printf '%s' "$SCHWAB_TOKEN" > schwab_token.json
+            echo "Schwab token written — recording primarily from Schwab (yfinance fallback)."
+          else
+            echo "No Schwab token secret — recording from yfinance only."
+          fi
+
       - name: Record daily SPY data point
         env:
           GOOGLE_SHEETS_CREDS: ${{ github.workspace }}/gcp_sa.json
+          # Make Schwab the primary source. get_provider() builds
+          # FallbackProvider(Schwab -> yfinance), so if Schwab is unavailable or
+          # the token has lapsed it silently falls back to yfinance — the daily
+          # recording never goes dark. Absent Schwab secrets simply leave Schwab
+          # unconfigured and the fallback serves everything from yfinance.
+          DATA_PROVIDER: schwab
+          SCHWAB_API_KEY: ${{ secrets.SCHWAB_API_KEY }}
+          SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
+          SCHWAB_TOKEN_PATH: schwab_token.json
         run: python daily_record.py SPY
 
       - name: Clean up credentials
         if: always()
-        run: rm -f "${{ github.workspace }}/gcp_sa.json"
+        run: rm -f "${{ github.workspace }}/gcp_sa.json" schwab_token.json
