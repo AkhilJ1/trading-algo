@@ -1,0 +1,62 @@
+name: Daily Prediction Recorder
+
+# Records one SPY prediction data point per trading day to the Google Sheet
+# the dashboard reads from. Runs in GitHub's cloud, independent of any local
+# machine being awake.
+
+on:
+  schedule:
+    # 22:30 UTC, Mon-Fri. This is after the US market close year-round
+    # (16:00 ET = 20:00 UTC in summer / 21:00 UTC in winter), so it is safe
+    # across daylight-saving changes. GitHub cron is always UTC.
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-record
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify credentials secret is present
+        env:
+          GCP_SA: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$GCP_SA" ]; then
+            echo "::error::GCP_SERVICE_ACCOUNT secret is not set. Add it under repo Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - name: Write Google service-account credentials
+        env:
+          GCP_SA: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: printf '%s' "$GCP_SA" > "${{ github.workspace }}/gcp_sa.json"
+
+      - name: Record daily SPY data point
+        env:
+          GOOGLE_SHEETS_CREDS: ${{ github.workspace }}/gcp_sa.json
+        run: python daily_record.py SPY
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f "${{ github.workspace }}/gcp_sa.json"
