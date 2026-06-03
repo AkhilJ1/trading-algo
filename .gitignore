@@ -5,3 +5,11 @@ __pycache__/
 *.pyc
 .DS_Store
 logs/
+
+# Schwab OAuth — never commit tokens or credentials
+schwab_token.json
+*.token.json
+.env
+
+# Local virtualenv for running schwab_auth.py (Python 3.12, schwab-py needs >=3.10)
+.venv/
