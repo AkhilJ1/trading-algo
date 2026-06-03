@@ -1,0 +1,75 @@
+name: Schwab Re-Auth Check
+
+# Requirement 2: the only non-autonomous step is the weekly Schwab browser login.
+# This workflow is the "agent" that notifies you before the 7-day refresh token
+# dies. It runs daily, measures how long the token has left, and — when it's
+# within ~36h of expiry — opens a GitHub issue (which emails you). The pipeline
+# keeps running on yfinance fallback in the meantime, so nothing breaks.
+#
+# Dormant until the SCHWAB_TOKEN secret exists: with no token it reports
+# "not configured" and does nothing.
+
+on:
+  schedule:
+    # 13:00 UTC daily (~morning ET) so there's a full day to react.
+    - cron: "0 13 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: schwab-reauth-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Write Schwab token (only if secret is configured)
+        env:
+          SCHWAB_TOKEN: ${{ secrets.SCHWAB_TOKEN }}
+        run: |
+          if [ -n "$SCHWAB_TOKEN" ]; then
+            printf '%s' "$SCHWAB_TOKEN" > schwab_token.json
+          fi
+
+      - name: Check token status
+        id: status
+        env:
+          SCHWAB_TOKEN_PATH: schwab_token.json
+        run: |
+          set +e
+          python schwab_token_status.py
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Open re-auth issue if needed (deduped)
+        if: steps.status.outputs.code == '10'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="🔑 Schwab re-auth needed"
+          existing=$(gh issue list --state open --search "$TITLE in:title" --json number --jq 'length')
+          if [ "$existing" = "0" ]; then
+            gh issue create \
+              --title "$TITLE" \
+              --body $'Your Schwab refresh token expires within ~36 hours.\n\n**Action:** run `python schwab_auth.py` locally to mint a fresh token, then update the `SCHWAB_TOKEN` repo secret with the new `schwab_token.json` contents.\n\nUntil then the pipeline automatically falls back to yfinance, so nothing is broken — data quality just reverts to the yfinance source. Close this issue once you have re-authenticated.'
+            echo "Opened re-auth issue."
+          else
+            echo "Re-auth issue already open ($existing) — not duplicating."
+          fi
+
+      - name: Clean up token
+        if: always()
+        run: rm -f schwab_token.json

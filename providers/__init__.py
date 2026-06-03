@@ -28,8 +28,14 @@ def _build(name: str) -> DataProvider:
         from .yfinance_provider import YFinanceProvider
         return YFinanceProvider()
     if name == "schwab":
+        # Schwab is primary, yfinance is the automatic safety net: if a Schwab
+        # call raises (expired token) or returns data that fails the quality
+        # gate, the fetch transparently degrades to yfinance. This is what keeps
+        # the pipeline autonomous across the weekly Schwab re-auth window.
         from .schwab_provider import SchwabProvider
-        return SchwabProvider()
+        from .yfinance_provider import YFinanceProvider
+        from .fallback_provider import FallbackProvider
+        return FallbackProvider(SchwabProvider(), YFinanceProvider())
     raise ValueError(
         f"Unknown DATA_PROVIDER {name!r}. Expected 'yfinance' or 'schwab'."
     )
