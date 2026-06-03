@@ -34,6 +34,13 @@ DATA_INTERVAL = '1d'    # Daily candles
 # Cache directory (relative to project root)
 CACHE_DIR = 'data/cache'
 
+# ── Market-data provider ──────────────────────────────────────────────────
+# Which backend supplies price history and option chains. "yfinance" is the
+# default (no credentials needed); "schwab" uses the Charles Schwab Trader API.
+# Override at runtime with the DATA_PROVIDER env var without editing this file.
+import os as _os
+DATA_PROVIDER = _os.environ.get('DATA_PROVIDER', 'yfinance').lower()
+
 # ── Fractal & Options Analysis ────────────────────────────────────────────
 FRACTAL_PERIOD = 5          # Bill Williams fractal: N bars each side
 FRACTAL_DIM_WINDOW = 30     # Window for fractal dimension (Hurst) calculation

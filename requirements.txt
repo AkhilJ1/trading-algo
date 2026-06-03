@@ -6,3 +6,6 @@ plotly>=5.18.0
 scipy>=1.10.0
 gspread>=5.12.0
 google-auth>=2.22.0
+# Optional: only needed when DATA_PROVIDER=schwab (lazy-imported, yfinance path
+# works without it installed).
+schwab-py>=1.4.0

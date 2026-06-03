@@ -2,9 +2,9 @@ import os
 from datetime import date
 
 import pandas as pd
-import yfinance as yf
 
 from config import CACHE_DIR, DATA_INTERVAL, DATA_PERIOD
+from providers import get_provider
 
 
 def fetch_stock_data(
@@ -30,7 +30,7 @@ def fetch_stock_data(
             df.index = df.index.tz_localize(None)
         return df
 
-    df = yf.Ticker(ticker).history(period=period, interval=interval)
+    df = get_provider().get_price_history(ticker, period=period, interval=interval)
     if df.empty:
         return pd.DataFrame()
 

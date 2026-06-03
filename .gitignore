@@ -5,3 +5,8 @@ __pycache__/
 *.pyc
 .DS_Store
 logs/
+
+# Schwab OAuth — never commit tokens or credentials
+schwab_token.json
+*.token.json
+.env

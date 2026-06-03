@@ -10,9 +10,9 @@ from datetime import date
 from typing import Optional, Tuple, List
 
 import pandas as pd
-import yfinance as yf
 
 from config import CACHE_DIR, FUTURES_PROXY
+from providers import get_provider
 
 
 def _resolve_ticker(ticker: str) -> Tuple[str, bool]:
@@ -33,10 +33,7 @@ def _cache_path(ticker: str, expiry: str) -> str:
 def fetch_expiration_dates(ticker: str) -> List[str]:
     """Return available expiration dates for a ticker's options."""
     resolved, _ = _resolve_ticker(ticker)
-    try:
-        return list(yf.Ticker(resolved).options)
-    except Exception:
-        return []
+    return get_provider().get_expirations(resolved)
 
 
 def _load_latest_cache(resolved: str, original: str, proxy_used: bool):
@@ -75,13 +72,9 @@ def fetch_options_chain(
                         spot_price, proxy_used.
     """
     resolved, proxy_used = _resolve_ticker(ticker)
-    t = yf.Ticker(resolved)
+    provider = get_provider()
 
-    available = []
-    try:
-        available = list(t.options)
-    except Exception:
-        pass
+    available = provider.get_expirations(resolved)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -109,9 +102,7 @@ def fetch_options_chain(
         return calls, puts, meta
 
     try:
-        chain = t.option_chain(expiry)
-        calls = chain.calls.copy()
-        puts = chain.puts.copy()
+        calls, puts = provider.get_option_chain(resolved, expiry)
     except Exception:
         # Fetch failed — try cached data
         cached_result = _load_latest_cache(resolved, ticker.upper(), proxy_used)
@@ -127,14 +118,14 @@ def fetch_options_chain(
             puts[col] = puts[col].fillna(0).astype(int)
 
     # Get spot price
-    hist = t.history(period='2d')
+    hist = provider.get_price_history(resolved, period='2d', interval='1d')
     spot = float(hist['Close'].iloc[-1]) if not hist.empty else 0.0
 
     # For futures tickers, also grab the actual futures price
     futures_spot = spot
     if proxy_used:
         try:
-            fhist = yf.Ticker(ticker.upper()).history(period='2d')
+            fhist = provider.get_price_history(ticker.upper(), period='2d', interval='1d')
             if not fhist.empty:
                 futures_spot = float(fhist['Close'].iloc[-1])
         except Exception:
