@@ -1,11 +1,29 @@
-yfinance>=0.2.36
-pandas>=2.0.0
-numpy>=1.24.0
-streamlit>=1.32.0
-plotly>=5.18.0
-scipy>=1.10.0
-gspread>=5.12.0
-google-auth>=2.22.0
-# Optional: only needed when DATA_PROVIDER=schwab (lazy-imported, yfinance path
-# works without it installed).
-schwab-py>=1.4.0
+# Pinned dependencies for reproducible builds.
+#
+# WHY PINNED: an unpinned `pandas>=2.0.0` was free to resolve to pandas 3.x in
+# CI, which carries breaking changes and could silently corrupt data or crash
+# the recorder. Every version below is locked to a known-good, mutually
+# compatible release (verified to resolve together). The compiled core
+# (numpy / pandas / scipy) is intentionally held to the conservative,
+# ubiquitous, battle-tested line rather than the bleeding edge.
+#
+# To upgrade deliberately: bump a pin, run the test suite (pytest) + the
+# data-health workflow, and only then commit the new pin.
+
+# --- compiled core (held conservative on purpose) ---
+numpy==1.26.4
+pandas==2.2.3
+scipy==1.13.1
+
+# --- market data + app ---
+yfinance==1.4.1
+streamlit==1.58.0
+plotly==6.8.0
+
+# --- google sheets (daily recorder target) ---
+gspread==6.2.1
+google-auth==2.53.0
+
+# --- Schwab provider (lazy-imported; only needed when DATA_PROVIDER=schwab,
+#     but pinned so CI installs a known-good version) ---
+schwab-py==1.5.1
