@@ -12,45 +12,55 @@ daily recorder) reads the token file silently and never needs a browser.
 
 USAGE
 -----
-    # one-time setup: put your app credentials in the environment
-    export SCHWAB_API_KEY="...."
-    export SCHWAB_APP_SECRET="...."
-    export SCHWAB_CALLBACK_URL="https://127.0.0.1"   # must match your app config
-    export SCHWAB_TOKEN_PATH="schwab_token.json"      # optional, this is default
+Just run it and answer the prompts (the secret is hidden as you type):
 
     python schwab_auth.py
 
-It prints a Schwab login URL. Log in, approve, and you'll be redirected to your
-callback URL (it may look like an error page — that's fine). Copy the FULL
-redirected URL from the browser address bar and paste it back here. The token
+It asks for your App Key, App Secret, and callback URL, then prints a Schwab
+login URL. Log in, approve, and you'll be redirected to your callback URL (it may
+look like a browser error page — that's fine, nothing is listening there). Copy
+the FULL redirected URL from the address bar and paste it back here. The token
 file is then written/refreshed and you're set for another ~7 days.
+
+You can also pre-set any of these as environment variables to skip the prompts
+(handy for re-runs): SCHWAB_API_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK_URL,
+SCHWAB_TOKEN_PATH (defaults to schwab_token.json).
 
 NOTE ON SAFETY
 --------------
 This script only ever runs locally, on a machine where you are logged into your
-own Schwab account in a browser. It writes the token to SCHWAB_TOKEN_PATH, which
-must stay out of git (see .gitignore). Never commit the token or your secret.
+own Schwab account in a browser. The hidden prompt keeps your secret out of your
+shell history. It writes the token to SCHWAB_TOKEN_PATH, which must stay out of
+git (see .gitignore). Never commit the token or your secret.
 """
 
 import os
 import sys
+import getpass
+
+
+def _prompt(env_name: str, label: str, *, secret: bool = False, default: str = None) -> str:
+    """Use the env var if set; otherwise ask interactively."""
+    val = os.environ.get(env_name)
+    if val:
+        return val.strip()
+    suffix = f" [{default}]" if default else ""
+    if secret:
+        entered = getpass.getpass(f"{label}{suffix}: ").strip()
+    else:
+        entered = input(f"{label}{suffix}: ").strip()
+    return entered or (default or "")
 
 
 def main() -> int:
-    api_key = os.environ.get('SCHWAB_API_KEY')
-    app_secret = os.environ.get('SCHWAB_APP_SECRET')
-    callback_url = os.environ.get('SCHWAB_CALLBACK_URL', 'https://127.0.0.1')
+    print("Schwab authentication — answer the prompts (secret input is hidden).\n")
+    api_key = _prompt('SCHWAB_API_KEY', 'App Key (Client ID)')
+    app_secret = _prompt('SCHWAB_APP_SECRET', 'App Secret', secret=True)
+    callback_url = _prompt('SCHWAB_CALLBACK_URL', 'Callback URL', default='https://127.0.0.1')
     token_path = os.environ.get('SCHWAB_TOKEN_PATH', 'schwab_token.json')
 
-    missing = [
-        name for name, val in (
-            ('SCHWAB_API_KEY', api_key),
-            ('SCHWAB_APP_SECRET', app_secret),
-        ) if not val
-    ]
-    if missing:
-        print(f"ERROR: missing env var(s): {', '.join(missing)}")
-        print("Set them and re-run. See the docstring at the top of this file.")
+    if not api_key or not app_secret:
+        print("ERROR: App Key and App Secret are both required.")
         return 1
 
     try:
