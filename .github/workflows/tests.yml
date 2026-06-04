@@ -1,0 +1,48 @@
+name: Tests
+
+# Runs the offline pytest suite on every push and pull request. These tests
+# exercise the data-pipeline machinery (provider factory, Schwab/yfinance
+# fallback routing, quality gates, options/stock fetchers, data-health checks)
+# with deterministic fakes — no network, no Schwab creds, no yfinance calls — so
+# a red check here means real machinery regressed before it can reach the cloud
+# cron jobs that record SPY and validate data accuracy.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: python -m pytest
