@@ -1552,6 +1552,7 @@ elif page == '🔬 Fractal & Options':
         is_sheets_available, get_current_weights,
         log_prediction, log_prediction_csv,
         read_predictions, read_predictions_csv,
+        read_outcomes, read_outcomes_csv,
         read_weight_history, log_weight_change,
     )
     _sheets_ok = is_sheets_available()
@@ -2188,6 +2189,104 @@ elif page == '🔬 Fractal & Options':
             st.caption('Data source: ' + ('Google Sheets' if _sheets_ok else 'Local CSV (connect Google Sheets for persistence)'))
     except Exception as e:
         st.warning(f'Could not load predictions: {e}')
+
+    # ── Dealer-Pin Close — Scored Track Record (item 2) ───────────────────
+    # Reads the durable, graded Outcomes ledger (Step 3) and shows whether the
+    # dealer-pin estimated close actually beats the naive "price stays at spot"
+    # baseline — net of nothing, just honest forecast-vs-realized error that
+    # grows one trading day at a time.
+    st.markdown('---')
+    st.subheader('Dealer-Pin Close — Track Record')
+    st.caption(
+        'Each matured forecast is scored against the realized close AND against '
+        'the naive "price just stays at spot" null model. Skill = naive error − '
+        'model error; positive means the dealer-pin estimate added value.'
+    )
+    try:
+        from track_record import summarize_track_record, join_predictions_outcomes
+
+        out_df = read_outcomes() if _sheets_ok else read_outcomes_csv()
+        tkr = result['ticker']
+        if out_df is not None and not out_df.empty and 'ticker' in out_df.columns:
+            tkr_out = out_df[out_df['ticker'].astype(str).str.upper() == tkr.upper()].copy()
+        else:
+            tkr_out = out_df if out_df is not None else pd.DataFrame()
+
+        summ = summarize_track_record(tkr_out)
+        if summ['n_graded'] == 0:
+            st.info(
+                f'No graded forecasts for {tkr} yet. Forecasts are graded the day '
+                'after their expiry closes — the track record fills in automatically '
+                'as days mature.'
+            )
+        else:
+            beats = summ['beats_naive']
+            if beats:
+                st.success(
+                    f"✅ Beats the naive baseline — mean error "
+                    f"${summ['mean_abs_err']:.2f} vs ${summ['naive_mean_abs_err']:.2f} "
+                    f"for \"stays at spot\" across {summ['n_graded']} graded forecast(s)."
+                )
+            else:
+                st.warning(
+                    f"⚠️ Not yet beating the naive baseline — mean error "
+                    f"${summ['mean_abs_err']:.2f} vs ${summ['naive_mean_abs_err']:.2f} "
+                    f"for \"stays at spot\" across {summ['n_graded']} graded forecast(s)."
+                )
+
+            tr1, tr2, tr3, tr4 = st.columns(4)
+            tr1.metric('Graded Forecasts', summ['n_graded'])
+            skill = summ['mean_skill']
+            tr2.metric(
+                'Mean Skill ($)',
+                f"{skill:+.2f}" if skill is not None else '—',
+                help='Avg ($) the model beat the naive spot baseline by. Positive = adds value.',
+            )
+            tr3.metric(
+                'Skill Rate',
+                f"{summ['skill_rate'] * 100:.0f}%" if summ['skill_rate'] is not None else '—',
+                help='Share of forecasts that beat the naive baseline.',
+            )
+            tr4.metric(
+                'Direction Accuracy',
+                f"{summ['dir_accuracy'] * 100:.0f}%" if summ['dir_accuracy'] is not None else '—',
+                help='Share of forecasts that called up/down vs spot correctly.',
+            )
+
+            tr5, tr6, tr7 = st.columns(3)
+            tr5.metric('Mean Abs Error', f"${summ['mean_abs_err']:.2f}")
+            tr6.metric('Naive Baseline Error', f"${summ['naive_mean_abs_err']:.2f}")
+            tr7.metric(
+                'In-Range Rate',
+                f"{summ['in_range_rate'] * 100:.0f}%" if summ['in_range_rate'] is not None else '—',
+                help='Share of realized closes that landed inside the [floor, ceiling] band.',
+            )
+
+            # Progress over time: cumulative mean skill as the record grows.
+            prog = tkr_out.copy()
+            prog['pred_date'] = pd.to_datetime(prog['pred_date'], errors='coerce')
+            prog = prog.dropna(subset=['pred_date']).sort_values('pred_date')
+            prog['skill'] = pd.to_numeric(prog['skill'], errors='coerce')
+            prog = prog.dropna(subset=['skill'])
+            if len(prog) >= 2:
+                prog['Cumulative Mean Skill ($)'] = prog['skill'].expanding().mean()
+                chart = prog.set_index('pred_date')[['Cumulative Mean Skill ($)']]
+                st.markdown('**Progress over time** — cumulative mean skill vs the naive baseline')
+                st.line_chart(chart)
+                st.caption('Above zero and trending up = the forecast is learning to beat "do nothing."')
+
+            with st.expander(f'Graded forecasts ({summ["n_graded"]})'):
+                show = tkr_out.copy()
+                show['pred_date'] = pd.to_datetime(show['pred_date'], errors='coerce')
+                show = show.sort_values('pred_date', ascending=False)
+                cols = [c for c in [
+                    'pred_date', 'expiry', 'spot_at_pred', 'estimated_close',
+                    'actual_close', 'close_abs_err', 'naive_abs_err', 'skill',
+                    'in_range', 'dir_correct',
+                ] if c in show.columns]
+                st.dataframe(show[cols].head(60), use_container_width=True)
+    except Exception as e:
+        st.warning(f'Could not load track record: {e}')
 
     # ══════════════════════════════════════════════════════════════════════
     # SECTION K: Signal Weights & Auto-Retune
