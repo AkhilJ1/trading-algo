@@ -820,6 +820,11 @@ def compute_composite_analysis(
         'price_ratio': round(price_ratio, 4),
         'timestamp': date.today().isoformat(),
         'expiry': expiry_used,
+        # Provenance from the data layer so the UI can show whether this is a
+        # live snapshot or the last-known-good chain served after the close.
+        'source': meta.get('source'),
+        'stale': bool(meta.get('stale', False)),
+        'as_of': meta.get('as_of'),
         'floor': round(display_floor, 2),
         'ceiling': round(display_ceiling, 2),
         'bias': bias,
