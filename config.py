@@ -53,15 +53,24 @@ FUTURES_PROXY = {
 }
 
 # Bias voting weights (sum to 1.0) — controls directional bias only, NOT floor/ceiling
+# 'fractals' = horizontal Williams/neural structure; 'vectors' = sloped dynamic
+# support/resistance (Fractal-Exchange-style vector reclaim/reject).
 SIGNAL_WEIGHTS = {
-    'options_walls':    0.25,
-    'gex_levels':       0.20,
-    'iv_range':         0.20,
-    'fractals':         0.15,
+    'options_walls':    0.22,
+    'gex_levels':       0.18,
+    'iv_range':         0.18,
+    'fractals':         0.12,
+    'vectors':          0.10,
     'put_call_ratio':   0.10,
     'iv_skew':          0.05,
     'max_pain':         0.05,
 }
+
+# Neural / vector structure parameters (Fractal-Exchange-style reads).
+NEURAL_TOLERANCE_PCT = 0.4   # band half-width as % of price for "touch/bounce" tests
+NEURAL_LOOKBACK = 120        # trading days of history scored for neural strength
+VECTOR_MAX_AGE = 120         # max bars since a vector's newer anchor to stay "active"
+NEURAL_BRACKET_MIN_STRENGTH = 2  # min neural strength to constrain the dealer-pin
 
 # ── Evidence-Based Range Engine ────────────────────────────────────────
 # Variance Risk Premium (IV systematically overstates realized vol)

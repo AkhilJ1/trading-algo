@@ -24,7 +24,7 @@ from plotly.subplots import make_subplots
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from config import WATCHLIST, MA_SHORT, MA_LONG, RSI_OVERSOLD, BB_WICK_LOOKBACK
+from config import WATCHLIST, MA_SHORT, MA_LONG, RSI_OVERSOLD, BB_WICK_LOOKBACK, SIGNAL_WEIGHTS
 from screener import discover_candidates
 from data_fetcher import fetch_stock_data
 from scanner import scan_ticker
@@ -1560,7 +1560,6 @@ elif page == '🔬 Fractal & Options':
         active_weights = get_current_weights() if _sheets_ok else dict(SIGNAL_WEIGHTS)
     except Exception:
         active_weights = dict(SIGNAL_WEIGHTS)
-    from config import SIGNAL_WEIGHTS
 
     # ── Run analysis ───────────────────────────────────────────────────────
     if analyze_btn and fo_ticker.strip():
@@ -1623,6 +1622,28 @@ elif page == '🔬 Fractal & Options':
         st.error(banner)
     else:
         st.warning(banner)
+
+    # ── Confluence verdict (Fractal-Exchange-style structure read) ─────────
+    # How many independent structure + flow signals agree here, surfaced at
+    # the top instead of buried below the charts. Full detail (vectors,
+    # neurals, factor list) lives in the "Fractal Structure" tab.
+    confl = result.get('confluence') or {}
+    if confl:
+        _cdir = confl.get('direction', 'neutral')
+        _clabel = confl.get('label', 'low')
+        _caligned = max(confl.get('bull', 0), confl.get('bear', 0))
+        _ctotal = confl.get('bull', 0) + confl.get('bear', 0)
+        _cicon = {'bullish': '🟢', 'bearish': '🔴'}.get(_cdir, '⚪')
+        _cpin = (' · sticky long-gamma (pin likely)' if confl.get('pin')
+                 else ' · slippery short-gamma (no pin)')
+        _cmsg = (f"{_cicon} **{_cdir.title()} confluence — {_clabel.upper()}** "
+                 f"({_caligned} of {_ctotal} signals aligned){_cpin}")
+        if _clabel == 'high':
+            st.success(_cmsg)
+        elif _clabel == 'medium':
+            st.info(_cmsg)
+        else:
+            st.warning(_cmsg)
 
     # Key metrics row
     iv_range = result['iv_range']
@@ -1794,603 +1815,688 @@ elif page == '🔬 Fractal & Options':
     st.markdown('---')
 
     # ══════════════════════════════════════════════════════════════════════
-    # SECTION B: Variance Risk Premium Analysis
+    # Detailed analysis — grouped into tabs so the page is navigable instead
+    # of one long scroll. Streamlit executes every tab body each rerun, so
+    # side effects (prediction logging above) are unaffected by this grouping.
     # ══════════════════════════════════════════════════════════════════════
-    st.subheader('Variance Risk Premium Analysis')
-    st.caption('IV systematically overstates realized vol — this is the #1 edge for iron condor sellers')
-    vp1, vp2, vp3, vp4 = st.columns(4)
-    vp1.metric('Raw ATM IV', f"{vrp.get('iv', 0)*100:.1f}%")
-    vp2.metric('Parkinson RV (20d)', f"{vrp.get('rv_parkinson', 0)*100:.1f}%" if vrp.get('rv_parkinson') else 'N/A')
-    vp3.metric('VRP Ratio (RV/IV)', f"{vrp.get('scaling_factor', 0):.3f}")
-    vp4.metric('IV Overstatement', f"{vrp.get('vrp_pct', 0):.1f}%")
+    tab_struct, tab_flow, tab_evidence, tab_track = st.tabs([
+        '🧬 Fractal Structure',
+        '⚙️ Options Flow',
+        '🧾 Evidence & Accuracy',
+        '📈 Track Record',
+    ])
 
-    st.markdown('---')
+    # ──────────────────────────────────────────────────────────────────────
+    # TAB 1 — Fractal Structure: chart + vectors + neurals + confluence detail
+    # ──────────────────────────────────────────────────────────────────────
+    with tab_struct:
+        st.subheader('Fractal Market Structure')
+        st.caption('Williams pivots + sloped vectors (flip role on a cross) + '
+                   'horizontal neural zones (scored by repeated bounces), drawn '
+                   'against the 1σ/2σ envelope and max-pain.')
+        price_df = result['price_df'].tail(120)
 
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION C: Fractal Structure Chart
-    # ══════════════════════════════════════════════════════════════════════
-    st.subheader('Fractal Market Structure')
-    price_df = result['price_df'].tail(120)
+        fig_frac = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.75, 0.25], vertical_spacing=0.03,
+            subplot_titles=(
+                f"{result['resolved_ticker']} — Fractal Pivots",
+                "Fractal Dimension (1.0=trending, 2.0=choppy)",
+            ),
+        )
 
-    fig_frac = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.75, 0.25], vertical_spacing=0.03,
-        subplot_titles=(
-            f"{result['resolved_ticker']} — Fractal Pivots",
-            "Fractal Dimension (1.0=trending, 2.0=choppy)",
-        ),
-    )
-
-    # Candlestick
-    fig_frac.add_trace(go.Candlestick(
-        x=price_df.index, open=price_df['Open'], high=price_df['High'],
-        low=price_df['Low'], close=price_df['Close'], name='Price',
-        increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
-    ), row=1, col=1)
-
-    # Fractal high markers
-    fh = price_df.dropna(subset=['fractal_high'])
-    if not fh.empty:
-        fig_frac.add_trace(go.Scatter(
-            x=fh.index, y=fh['fractal_high'] * 1.003,
-            mode='markers', name='Fractal High (Resistance)',
-            marker=dict(symbol='triangle-down', color='#ef5350', size=10),
+        # Candlestick
+        fig_frac.add_trace(go.Candlestick(
+            x=price_df.index, open=price_df['Open'], high=price_df['High'],
+            low=price_df['Low'], close=price_df['Close'], name='Price',
+            increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
         ), row=1, col=1)
 
-    # Fractal low markers
-    fl = price_df.dropna(subset=['fractal_low'])
-    if not fl.empty:
-        fig_frac.add_trace(go.Scatter(
-            x=fl.index, y=fl['fractal_low'] * 0.997,
-            mode='markers', name='Fractal Low (Support)',
-            marker=dict(symbol='triangle-up', color='#26a69a', size=10),
-        ), row=1, col=1)
+        # Fractal high markers
+        fh = price_df.dropna(subset=['fractal_high'])
+        if not fh.empty:
+            fig_frac.add_trace(go.Scatter(
+                x=fh.index, y=fh['fractal_high'] * 1.003,
+                mode='markers', name='Fractal High (Resistance)',
+                marker=dict(symbol='triangle-down', color='#ef5350', size=10),
+            ), row=1, col=1)
 
-    # Floor / Ceiling lines at multiple sigma levels
-    proxy_floor = floor_val / r_ratio if r_ratio > 1 else floor_val
-    proxy_ceil = ceil_val / r_ratio if r_ratio > 1 else ceil_val
-    fig_frac.add_hline(y=proxy_floor, line=dict(color='#26a69a', width=2, dash='dash'),
-                       row=1, col=1, annotation_text=f"1σ Floor ${floor_val:.2f}",
-                       annotation_position='right')
-    fig_frac.add_hline(y=proxy_ceil, line=dict(color='#ef5350', width=2, dash='dash'),
-                       row=1, col=1, annotation_text=f"1σ Ceiling ${ceil_val:.2f}",
-                       annotation_position='right')
-    # 2-sigma lines (lighter)
-    r2s = ranges.get('2sigma', {})
-    if r2s:
-        f2 = r2s['floor'] / r_ratio if r_ratio > 1 else r2s['floor']
-        c2 = r2s['ceiling'] / r_ratio if r_ratio > 1 else r2s['ceiling']
-        fig_frac.add_hline(y=f2, line=dict(color='#26a69a', width=1, dash='dot'),
-                           row=1, col=1, annotation_text=f"2σ ${r2s['floor']:.2f}",
+        # Fractal low markers
+        fl = price_df.dropna(subset=['fractal_low'])
+        if not fl.empty:
+            fig_frac.add_trace(go.Scatter(
+                x=fl.index, y=fl['fractal_low'] * 0.997,
+                mode='markers', name='Fractal Low (Support)',
+                marker=dict(symbol='triangle-up', color='#26a69a', size=10),
+            ), row=1, col=1)
+
+        # Floor / Ceiling lines at multiple sigma levels
+        proxy_floor = floor_val / r_ratio if r_ratio > 1 else floor_val
+        proxy_ceil = ceil_val / r_ratio if r_ratio > 1 else ceil_val
+        fig_frac.add_hline(y=proxy_floor, line=dict(color='#26a69a', width=2, dash='dash'),
+                           row=1, col=1, annotation_text=f"1σ Floor ${floor_val:.2f}",
                            annotation_position='right')
-        fig_frac.add_hline(y=c2, line=dict(color='#ef5350', width=1, dash='dot'),
-                           row=1, col=1, annotation_text=f"2σ ${r2s['ceiling']:.2f}",
+        fig_frac.add_hline(y=proxy_ceil, line=dict(color='#ef5350', width=2, dash='dash'),
+                           row=1, col=1, annotation_text=f"1σ Ceiling ${ceil_val:.2f}",
                            annotation_position='right')
+        # 2-sigma lines (lighter)
+        r2s = ranges.get('2sigma', {})
+        if r2s:
+            f2 = r2s['floor'] / r_ratio if r_ratio > 1 else r2s['floor']
+            c2 = r2s['ceiling'] / r_ratio if r_ratio > 1 else r2s['ceiling']
+            fig_frac.add_hline(y=f2, line=dict(color='#26a69a', width=1, dash='dot'),
+                               row=1, col=1, annotation_text=f"2σ ${r2s['floor']:.2f}",
+                               annotation_position='right')
+            fig_frac.add_hline(y=c2, line=dict(color='#ef5350', width=1, dash='dot'),
+                               row=1, col=1, annotation_text=f"2σ ${r2s['ceiling']:.2f}",
+                               annotation_position='right')
 
-    # Max pain line
-    fig_frac.add_hline(y=result['max_pain'], line=dict(color='#ff9800', width=1, dash='dot'),
-                       row=1, col=1, annotation_text=f"Max Pain ${result['max_pain']:.0f} (info)",
-                       annotation_position='left')
+        # Max pain line
+        fig_frac.add_hline(y=result['max_pain'], line=dict(color='#ff9800', width=1, dash='dot'),
+                           row=1, col=1, annotation_text=f"Max Pain ${result['max_pain']:.0f} (info)",
+                           annotation_position='left')
 
-    # Fractal dimension subplot
-    if 'fractal_dimension' in price_df.columns:
-        fig_frac.add_trace(go.Scatter(
-            x=price_df.index, y=price_df['fractal_dimension'],
-            name='Fractal Dimension', line=dict(color='#ff9800', width=1.5),
-        ), row=2, col=1)
-        fig_frac.add_hline(y=1.5, line=dict(color='#666', dash='dot'),
-                           row=2, col=1, annotation_text='Random Walk')
-        fig_frac.add_hline(y=1.35, line=dict(color='#26a69a', dash='dot'),
-                           row=2, col=1, annotation_text='Trending')
-        fig_frac.add_hline(y=1.65, line=dict(color='#ef5350', dash='dot'),
-                           row=2, col=1, annotation_text='Choppy')
+        # Vectors — sloped dynamic support/resistance (Fractal-Exchange style),
+        # projected across the visible window on the proxy price axis. A crossed
+        # (flipped) vector is drawn dotted.
+        _vecs = result.get('vectors') or {}
+        _nbars = len(price_df)
+        for _vkey, _vcolor in (('support_vector', '#26a69a'), ('resistance_vector', '#ef5350')):
+            _v = _vecs.get(_vkey)
+            if not _v or _v.get('current_value') is None:
+                continue
+            _ry = _v['current_value'] / r_ratio if r_ratio > 1 else _v['current_value']
+            _slope = _v.get('slope_per_bar', 0.0)        # proxy units per bar
+            _ly = _ry - _slope * (_nbars - 1)
+            fig_frac.add_trace(go.Scatter(
+                x=[price_df.index[0], price_df.index[-1]], y=[_ly, _ry],
+                mode='lines', name=f"{_vkey.split('_')[0].title()} Vector ({_v.get('role')})",
+                line=dict(color=_vcolor, width=2,
+                          dash='dot' if _v.get('crossed') else 'solid'),
+            ), row=1, col=1)
 
-    fig_frac.update_layout(
-        height=650, xaxis_rangeslider_visible=False,
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-        margin=dict(t=50, b=20, l=0, r=80),
-        paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
-        font=dict(color='#fafafa'),
-    )
-    fig_frac.update_xaxes(gridcolor='#1e2130')
-    fig_frac.update_yaxes(gridcolor='#1e2130')
-    st.plotly_chart(fig_frac)
+        # Neurals — strongest horizontal zones (multiple-bounce levels). Only draw
+        # zones that fall inside the visible price window so a strong-but-distant
+        # level doesn't compress the y-axis.
+        _neur = result.get('neural_zones') or {}
+        _vis_lo, _vis_hi = float(price_df['Low'].min()), float(price_df['High'].max())
+        for _z in (_neur.get('support_zones') or [])[:3]:
+            _yc = _z['center'] / r_ratio if r_ratio > 1 else _z['center']
+            if _z.get('strength', 0) < 2 or not (_vis_lo <= _yc <= _vis_hi):
+                continue
+            fig_frac.add_hline(y=_yc, line=dict(color='#26a69a', width=1),
+                               row=1, col=1,
+                               annotation_text=f"Neural S ${_z['center']:.0f} (×{_z['bounces']})",
+                               annotation_position='left')
+        for _z in (_neur.get('resistance_zones') or [])[:3]:
+            _yc = _z['center'] / r_ratio if r_ratio > 1 else _z['center']
+            if _z.get('strength', 0) < 2 or not (_vis_lo <= _yc <= _vis_hi):
+                continue
+            fig_frac.add_hline(y=_yc, line=dict(color='#ef5350', width=1),
+                               row=1, col=1,
+                               annotation_text=f"Neural R ${_z['center']:.0f} (×{_z['bounces']})",
+                               annotation_position='left')
 
-    st.markdown('---')
+        # Fractal dimension subplot
+        if 'fractal_dimension' in price_df.columns:
+            fig_frac.add_trace(go.Scatter(
+                x=price_df.index, y=price_df['fractal_dimension'],
+                name='Fractal Dimension', line=dict(color='#ff9800', width=1.5),
+            ), row=2, col=1)
+            fig_frac.add_hline(y=1.5, line=dict(color='#666', dash='dot'),
+                               row=2, col=1, annotation_text='Random Walk')
+            fig_frac.add_hline(y=1.35, line=dict(color='#26a69a', dash='dot'),
+                               row=2, col=1, annotation_text='Trending')
+            fig_frac.add_hline(y=1.65, line=dict(color='#ef5350', dash='dot'),
+                               row=2, col=1, annotation_text='Choppy')
 
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION D: GEX Profile
-    # ══════════════════════════════════════════════════════════════════════
-    st.subheader('Gamma Exposure (GEX) Profile')
-    st.caption('Positive GEX = sticky/mean-reverting (dealers dampen moves)  |  '
-               'Negative GEX = slippery (dealers amplify moves)')
-    gex_df = result['gex_df']
-    if gex_df is not None and not gex_df.empty:
-        fig_gex = go.Figure()
-        colors = ['#26a69a' if v >= 0 else '#ef5350' for v in gex_df['net_gex']]
-        fig_gex.add_trace(go.Bar(
-            x=gex_df['strike'], y=gex_df['net_gex'],
-            marker_color=colors, name='Net GEX',
-        ))
-        fig_gex.add_vline(x=result['proxy_spot'],
-                          line=dict(color='white', width=2, dash='dash'),
-                          annotation_text=f"Spot ${result['proxy_spot']:.2f}")
-        fig_gex.update_layout(
-            height=350, xaxis_title='Strike Price', yaxis_title='Net Gamma Exposure ($)',
+        fig_frac.update_layout(
+            height=650, xaxis_rangeslider_visible=False,
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+            margin=dict(t=50, b=20, l=0, r=80),
             paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
             font=dict(color='#fafafa'),
-            margin=dict(t=30, b=20, l=0, r=20),
         )
-        fig_gex.update_xaxes(gridcolor='#1e2130')
-        fig_gex.update_yaxes(gridcolor='#1e2130')
-        st.plotly_chart(fig_gex)
+        fig_frac.update_xaxes(gridcolor='#1e2130')
+        fig_frac.update_yaxes(gridcolor='#1e2130')
+        st.plotly_chart(fig_frac)
 
-        # GEX summary
-        total_gex = gex_df['net_gex'].sum()
-        max_gex_strike = gex_df.loc[gex_df['net_gex'].abs().idxmax(), 'strike'] if not gex_df.empty else 0
-        g1, g2, g3 = st.columns(3)
-        g1.metric('Total Net GEX', f"${total_gex:,.0f}")
-        g2.metric('GEX Regime', 'Sticky' if total_gex > 0 else 'Slippery')
-        g3.metric('Highest GEX Strike', f"${max_gex_strike:.0f}")
-    else:
-        st.warning('GEX data not available for this ticker.')
+        # ── Vectors / Neurals tables + confluence factor list ──────────────
+        st.markdown('**Vectors, Neurals & Confluence**')
+        st.caption('Sloped vectors (flip role on a cross) + horizontal neural '
+                   'zones (scored by repeated bounces) + options flow, tallied '
+                   'into the confluence verdict shown at the top of the page.')
 
-    st.markdown('---')
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION E: Options OI Walls
-    # ══════════════════════════════════════════════════════════════════════
-    st.subheader('Open Interest Walls — Support & Resistance')
-    st.caption('High OI concentrations at strikes act as magnets and barriers due to dealer hedging')
-    walls = result['options_walls']
-
-    oi_col1, oi_col2 = st.columns(2)
-    with oi_col1:
-        st.markdown('**Call Walls (Resistance)**')
-        if walls.get('call_walls'):
-            cw_strikes = [w[0] for w in walls['call_walls']]
-            cw_oi = [w[1] for w in walls['call_walls']]
-            fig_cw = go.Figure(go.Bar(
-                x=cw_strikes, y=cw_oi, marker_color='#ef5350', name='Call OI',
-            ))
-            fig_cw.add_vline(x=result['proxy_spot'],
-                             line=dict(color='white', width=1, dash='dash'))
-            fig_cw.update_layout(
-                height=280, paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
-                font=dict(color='#fafafa'), margin=dict(t=10, b=20, l=0, r=0),
-                xaxis_title='Strike', yaxis_title='Open Interest',
-            )
-            fig_cw.update_xaxes(gridcolor='#1e2130')
-            fig_cw.update_yaxes(gridcolor='#1e2130')
-            st.plotly_chart(fig_cw)
-        else:
-            st.info('No significant call walls found.')
-
-    with oi_col2:
-        st.markdown('**Put Walls (Support)**')
-        if walls.get('put_walls'):
-            pw_strikes = [w[0] for w in walls['put_walls']]
-            pw_oi = [w[1] for w in walls['put_walls']]
-            fig_pw = go.Figure(go.Bar(
-                x=pw_strikes, y=pw_oi, marker_color='#26a69a', name='Put OI',
-            ))
-            fig_pw.add_vline(x=result['proxy_spot'],
-                             line=dict(color='white', width=1, dash='dash'))
-            fig_pw.update_layout(
-                height=280, paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
-                font=dict(color='#fafafa'), margin=dict(t=10, b=20, l=0, r=0),
-                xaxis_title='Strike', yaxis_title='Open Interest',
-            )
-            fig_pw.update_xaxes(gridcolor='#1e2130')
-            fig_pw.update_yaxes(gridcolor='#1e2130')
-            st.plotly_chart(fig_pw)
-        else:
-            st.info('No significant put walls found.')
-
-    st.markdown('---')
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION F: Sentiment & IV Skew
-    # ══════════════════════════════════════════════════════════════════════
-    st.subheader('Sentiment & IV Skew')
-    pc = result['put_call_ratios']
-    skew_data = result['iv_skew']
-
-    s1, s2, s3, s4 = st.columns(4)
-    s1.metric('P/C Ratio (OI)', f"{pc['pc_ratio_oi']:.2f}",
-              delta=pc['oi_bias'].title())
-    s2.metric('P/C Ratio (Volume)', f"{pc['pc_ratio_volume']:.2f}",
-              delta=pc['volume_bias'].title())
-    s3.metric('IV Skew Ratio', f"{skew_data['skew_ratio']:.2f}",
-              delta=skew_data['skew_bias'].title())
-    s4.metric('OTM Put IV / Call IV',
-              f"{skew_data['otm_put_iv']*100:.1f}% / {skew_data['otm_call_iv']*100:.1f}%")
-
-    # Sentiment interpretation
-    pc_note = ''
-    if pc['oi_bias'] == 'bearish':
-        pc_note = 'Elevated put OI suggests institutional hedging or bearish positioning.'
-    elif pc['oi_bias'] == 'bullish':
-        pc_note = 'Low put/call ratio suggests bullish sentiment — less hedging activity.'
-    if skew_data['skew_bias'] == 'bearish':
-        pc_note += ' High IV skew indicates institutions are paying up for downside protection.'
-    elif skew_data['skew_bias'] == 'bullish':
-        pc_note += ' Low IV skew suggests complacency — less demand for downside hedging.'
-    if pc_note:
-        st.caption(pc_note.strip())
-
-    s5, s6, s7, s8 = st.columns(4)
-    s5.metric('Total Call OI', f"{pc['call_oi_total']:,}")
-    s6.metric('Total Put OI', f"{pc['put_oi_total']:,}")
-    s7.metric('Total Call Volume', f"{pc['call_volume_total']:,}")
-    s8.metric('Total Put Volume', f"{pc['put_volume_total']:,}")
-
-    st.markdown('---')
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION G: Evidence Breakdown Table
-    # ══════════════════════════════════════════════════════════════════════
-    st.subheader('Evidence Breakdown')
-    st.caption('Signal weights control directional bias voting only. Floor/ceiling uses the evidence-based IV + VRP pipeline.')
-
-    evidence_rows = []
-    for sig in result['signals']:
-        if sig['bias'] == 'bullish':
-            bias_display = 'Bullish'
-        elif sig['bias'] == 'bearish':
-            bias_display = 'Bearish'
-        else:
-            bias_display = 'Neutral'
-        evidence_rows.append({
-            'Signal': sig['name'].replace('_', ' ').title(),
-            'Bias': bias_display,
-            'Weight': f"{sig['weight']*100:.0f}%",
-            'Evidence': sig['evidence'],
-        })
-    st.dataframe(pd.DataFrame(evidence_rows))
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION H: Range Accuracy (Historical Validation)
-    # ══════════════════════════════════════════════════════════════════════
-    st.subheader('Range Accuracy — Historical Validation')
-    st.caption('Tests how often the predicted daily range contained the actual next-day close (using realized volatility as IV proxy)')
-    from strategies.fractal_indicators import compute_range_containment
-    price_ticker = result['resolved_ticker'] if result['proxy_used'] else result['ticker']
-    range_df = fetch_stock_data(price_ticker, period='1y')
-    if not range_df.empty:
-        containment = compute_range_containment(range_df, window=60)
-        ra1, ra2, ra3, ra4 = st.columns(4)
-        ra1.metric('Days Tested', containment['days_tested'])
-        c1s = containment['containment_1sigma_pct']
-        ra2.metric('1-Sigma Containment', f"{c1s:.1f}%",
-                   delta=f"{c1s - 68.3:+.1f}% vs expected 68.3%")
-        c2s = containment['containment_2sigma_pct']
-        ra3.metric('2-Sigma Containment', f"{c2s:.1f}%",
-                   delta=f"{c2s - 95.4:+.1f}% vs expected 95.4%")
-        # Accuracy grade
-        deviation = abs(c1s - 68.3) + abs(c2s - 95.4)
-        if deviation < 5:
-            grade = 'A — Excellent'
-        elif deviation < 10:
-            grade = 'B — Good'
-        elif deviation < 20:
-            grade = 'C — Fair'
-        else:
-            grade = 'D — Needs refinement'
-        ra4.metric('Calibration Grade', grade)
-
-        with st.expander('Daily Range Results (last 20 days)'):
-            if containment['daily_results']:
-                range_rows = []
-                for dr in containment['daily_results'][-20:]:
-                    range_rows.append({
-                        'Date': dr['date'].strftime('%Y-%m-%d') if hasattr(dr['date'], 'strftime') else str(dr['date'])[:10],
-                        'Close': f"${dr['close']:.2f}",
-                        'Next Close': f"${dr['next_close']:.2f}",
-                        '1-Sigma Range': f"${dr['range_low_1s']:.2f} — ${dr['range_high_1s']:.2f}",
-                        'In 1-Sigma': 'Yes' if dr['in_1sigma'] else 'No',
-                        'In 2-Sigma': 'Yes' if dr['in_2sigma'] else 'No',
-                    })
-                st.dataframe(pd.DataFrame(range_rows))
-
-    st.markdown('---')
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION I: Raw Options Data
-    # ══════════════════════════════════════════════════════════════════════
-    with st.expander('Raw Options Chain Data'):
-        from options_fetcher import fetch_options_chain as _fetch_chain
-        raw_c, raw_p, _ = _fetch_chain(result['ticker'])
-        display_cols = ['strike', 'lastPrice', 'bid', 'ask',
-                        'volume', 'openInterest', 'impliedVolatility']
-        available_cols_c = [c for c in display_cols if c in raw_c.columns]
-        available_cols_p = [c for c in display_cols if c in raw_p.columns]
-
-        rc1, rc2 = st.columns(2)
-        with rc1:
-            st.markdown('**Calls**')
-            if available_cols_c:
-                st.dataframe(raw_c[available_cols_c].head(30))
-        with rc2:
-            st.markdown('**Puts**')
-            if available_cols_p:
-                st.dataframe(raw_p[available_cols_p].head(30))
-
-    with st.expander('Fractal Levels (Recent)'):
-        fl_data = result['fractal_levels']
-        fl_c1, fl_c2 = st.columns(2)
-        with fl_c1:
-            st.markdown('**Resistance (Fractal Highs)**')
-            for dt, price in fl_data.get('resistance_levels', []):
-                d = dt.strftime('%Y-%m-%d') if hasattr(dt, 'strftime') else str(dt)[:10]
-                st.text(f"  {d}  —  ${price:.2f}")
-        with fl_c2:
-            st.markdown('**Support (Fractal Lows)**')
-            for dt, price in fl_data.get('support_levels', []):
-                d = dt.strftime('%Y-%m-%d') if hasattr(dt, 'strftime') else str(dt)[:10]
-                st.text(f"  {d}  —  ${price:.2f}")
-
-    st.markdown('---')
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION J: Live Prediction Tracking
-    # ══════════════════════════════════════════════════════════════════════
-    st.subheader('Live Prediction Tracking')
-    st.caption('Historical log of predictions — compare predicted floor/ceiling vs actual closes')
-    try:
-        pred_df = read_predictions() if _sheets_ok else read_predictions_csv()
-        if not pred_df.empty:
-            ticker_preds = pred_df[pred_df['ticker'] == result['ticker']].tail(30)
-            if not ticker_preds.empty:
-                scored_rows = []
-                price_ticker = result['resolved_ticker'] if result['proxy_used'] else result['ticker']
-                hist_df = fetch_stock_data(price_ticker, period='3mo')
-                if not hist_df.empty and isinstance(hist_df.index, pd.DatetimeIndex):
-                    if hist_df.index.tz is not None:
-                        hist_df.index = hist_df.index.tz_localize(None)
-                    for _, pred in ticker_preds.iterrows():
-                        pred_date = pd.Timestamp(pred['date'])
-                        future = hist_df[hist_df.index > pred_date]
-                        if len(future) > 0:
-                            actual_close = float(future['Close'].iloc[0])
-                            in_range = pred['floor'] <= actual_close <= pred['ceiling']
-                            bias_correct = (
-                                (pred['bias'] == 'BULLISH' and actual_close > pred['spot_price']) or
-                                (pred['bias'] == 'BEARISH' and actual_close < pred['spot_price']) or
-                                (pred['bias'] == 'NEUTRAL')
-                            )
-                            scored_rows.append({
-                                'Date': str(pred['date'])[:10] if not pd.isna(pred['date']) else '',
-                                'Spot': f"${pred['spot_price']:.2f}",
-                                'Floor': f"${pred['floor']:.2f}",
-                                'Ceiling': f"${pred['ceiling']:.2f}",
-                                'Bias': pred['bias'],
-                                'Actual Close': f"${actual_close:.2f}",
-                                'In Range': 'Yes' if in_range else 'No',
-                                'Bias Correct': 'Yes' if bias_correct else 'No',
-                            })
-
-                if scored_rows:
-                    scored_disp = pd.DataFrame(scored_rows)
-                    range_acc = scored_disp['In Range'].value_counts().get('Yes', 0) / len(scored_disp) * 100
-                    bias_acc = scored_disp['Bias Correct'].value_counts().get('Yes', 0) / len(scored_disp) * 100
-                    lt1, lt2, lt3 = st.columns(3)
-                    lt1.metric('Predictions Tracked', len(scored_disp))
-                    lt2.metric('Range Accuracy', f"{range_acc:.0f}%")
-                    lt3.metric('Bias Accuracy', f"{bias_acc:.0f}%")
-                    st.dataframe(scored_disp)
-                else:
-                    st.info(f'{len(ticker_preds)} prediction(s) logged for {result["ticker"]}. '
-                            'Accuracy scoring requires at least one subsequent trading day.')
+        _vcol, _ncol = st.columns(2)
+        with _vcol:
+            st.markdown('**Vectors** (dynamic S/R)')
+            _vrows = []
+            for _vkey, _vlabel in (('support_vector', 'Support-anchored'),
+                                   ('resistance_vector', 'Resistance-anchored')):
+                _v = _vecs.get(_vkey)
+                if not _v:
+                    continue
+                _vrows.append({
+                    'Vector': _vlabel,
+                    'Now @': f"${_v['current_value']:.2f}",
+                    'Role': _v['role'] + (' (flipped)' if _v.get('crossed') else ''),
+                    'Slope': _v.get('direction', ''),
+                })
+            if _vrows:
+                st.dataframe(pd.DataFrame(_vrows), hide_index=True)
             else:
-                st.info(f'No predictions logged yet for {result["ticker"]}. Click Analyze to start tracking.')
-        else:
-            st.info('No predictions recorded yet. Click Analyze to start tracking.')
-            st.caption('Data source: ' + ('Google Sheets' if _sheets_ok else 'Local CSV (connect Google Sheets for persistence)'))
-    except Exception as e:
-        st.warning(f'Could not load predictions: {e}')
+                st.caption('No active vectors (need two recent same-type pivots).')
 
-    # ── Dealer-Pin Close — Scored Track Record (item 2) ───────────────────
-    # Reads the durable, graded Outcomes ledger (Step 3) and shows whether the
-    # dealer-pin estimated close actually beats the naive "price stays at spot"
-    # baseline — net of nothing, just honest forecast-vs-realized error that
-    # grows one trading day at a time.
-    st.markdown('---')
-    st.subheader('Dealer-Pin Close — Track Record')
-    st.caption(
-        'Each matured forecast is scored against the realized close AND against '
-        'the naive "price just stays at spot" null model. Skill = naive error − '
-        'model error; positive means the dealer-pin estimate added value.'
-    )
-    try:
-        from track_record import summarize_track_record, join_predictions_outcomes
-
-        out_df = read_outcomes() if _sheets_ok else read_outcomes_csv()
-        tkr = result['ticker']
-        if out_df is not None and not out_df.empty and 'ticker' in out_df.columns:
-            tkr_out = out_df[out_df['ticker'].astype(str).str.upper() == tkr.upper()].copy()
-        else:
-            tkr_out = out_df if out_df is not None else pd.DataFrame()
-
-        summ = summarize_track_record(tkr_out)
-        if summ['n_graded'] == 0:
-            st.info(
-                f'No graded forecasts for {tkr} yet. Forecasts are graded the day '
-                'after their expiry closes — the track record fills in automatically '
-                'as days mature.'
-            )
-        else:
-            beats = summ['beats_naive']
-            if beats:
-                st.success(
-                    f"✅ Beats the naive baseline — mean error "
-                    f"${summ['mean_abs_err']:.2f} vs ${summ['naive_mean_abs_err']:.2f} "
-                    f"for \"stays at spot\" across {summ['n_graded']} graded forecast(s)."
-                )
+        with _ncol:
+            st.markdown('**Neurals** (strongest zones)')
+            _nrows = []
+            for _z in (_neur.get('resistance_zones') or [])[:3]:
+                _nrows.append({'Zone': 'Resistance', 'Level': f"${_z['center']:.2f}",
+                               'Bounces': _z['bounces'], 'Strength': _z['strength']})
+            for _z in (_neur.get('support_zones') or [])[:3]:
+                _nrows.append({'Zone': 'Support', 'Level': f"${_z['center']:.2f}",
+                               'Bounces': _z['bounces'], 'Strength': _z['strength']})
+            if _nrows:
+                st.dataframe(pd.DataFrame(_nrows), hide_index=True)
             else:
-                st.warning(
-                    f"⚠️ Not yet beating the naive baseline — mean error "
-                    f"${summ['mean_abs_err']:.2f} vs ${summ['naive_mean_abs_err']:.2f} "
-                    f"for \"stays at spot\" across {summ['n_graded']} graded forecast(s)."
+                st.caption('No scored neural zones yet.')
+
+        if confl.get('factors'):
+            with st.expander('Confluence factors (what voted, and which way)'):
+                for _f in confl['factors']:
+                    _fi = {'bullish': '🟢', 'bearish': '🔴'}.get(_f['direction'], '⚪')
+                    st.markdown(f"- {_fi} **{_f['name']}** — {_f['detail']}")
+
+        with st.expander('Fractal Levels (Recent)'):
+            fl_data = result['fractal_levels']
+            fl_c1, fl_c2 = st.columns(2)
+            with fl_c1:
+                st.markdown('**Resistance (Fractal Highs)**')
+                for dt, price in fl_data.get('resistance_levels', []):
+                    d = dt.strftime('%Y-%m-%d') if hasattr(dt, 'strftime') else str(dt)[:10]
+                    st.text(f"  {d}  —  ${price:.2f}")
+            with fl_c2:
+                st.markdown('**Support (Fractal Lows)**')
+                for dt, price in fl_data.get('support_levels', []):
+                    d = dt.strftime('%Y-%m-%d') if hasattr(dt, 'strftime') else str(dt)[:10]
+                    st.text(f"  {d}  —  ${price:.2f}")
+
+    # ──────────────────────────────────────────────────────────────────────
+    # TAB 2 — Options Flow: GEX, OI walls, sentiment/skew, raw chain
+    # ──────────────────────────────────────────────────────────────────────
+    with tab_flow:
+        st.subheader('Gamma Exposure (GEX) Profile')
+        st.caption('Positive GEX = sticky/mean-reverting (dealers dampen moves)  |  '
+                   'Negative GEX = slippery (dealers amplify moves)')
+        gex_df = result['gex_df']
+        if gex_df is not None and not gex_df.empty:
+            fig_gex = go.Figure()
+            colors = ['#26a69a' if v >= 0 else '#ef5350' for v in gex_df['net_gex']]
+            fig_gex.add_trace(go.Bar(
+                x=gex_df['strike'], y=gex_df['net_gex'],
+                marker_color=colors, name='Net GEX',
+            ))
+            fig_gex.add_vline(x=result['proxy_spot'],
+                              line=dict(color='white', width=2, dash='dash'),
+                              annotation_text=f"Spot ${result['proxy_spot']:.2f}")
+            fig_gex.update_layout(
+                height=350, xaxis_title='Strike Price', yaxis_title='Net Gamma Exposure ($)',
+                paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
+                font=dict(color='#fafafa'),
+                margin=dict(t=30, b=20, l=0, r=20),
+            )
+            fig_gex.update_xaxes(gridcolor='#1e2130')
+            fig_gex.update_yaxes(gridcolor='#1e2130')
+            st.plotly_chart(fig_gex)
+
+            # GEX summary
+            total_gex = gex_df['net_gex'].sum()
+            max_gex_strike = gex_df.loc[gex_df['net_gex'].abs().idxmax(), 'strike'] if not gex_df.empty else 0
+            g1, g2, g3 = st.columns(3)
+            g1.metric('Total Net GEX', f"${total_gex:,.0f}")
+            g2.metric('GEX Regime', 'Sticky' if total_gex > 0 else 'Slippery')
+            g3.metric('Highest GEX Strike', f"${max_gex_strike:.0f}")
+        else:
+            st.warning('GEX data not available for this ticker.')
+
+        st.markdown('---')
+
+        st.subheader('Open Interest Walls — Support & Resistance')
+        st.caption('High OI concentrations at strikes act as magnets and barriers due to dealer hedging')
+        walls = result['options_walls']
+
+        oi_col1, oi_col2 = st.columns(2)
+        with oi_col1:
+            st.markdown('**Call Walls (Resistance)**')
+            if walls.get('call_walls'):
+                cw_strikes = [w[0] for w in walls['call_walls']]
+                cw_oi = [w[1] for w in walls['call_walls']]
+                fig_cw = go.Figure(go.Bar(
+                    x=cw_strikes, y=cw_oi, marker_color='#ef5350', name='Call OI',
+                ))
+                fig_cw.add_vline(x=result['proxy_spot'],
+                                 line=dict(color='white', width=1, dash='dash'))
+                fig_cw.update_layout(
+                    height=280, paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
+                    font=dict(color='#fafafa'), margin=dict(t=10, b=20, l=0, r=0),
+                    xaxis_title='Strike', yaxis_title='Open Interest',
                 )
+                fig_cw.update_xaxes(gridcolor='#1e2130')
+                fig_cw.update_yaxes(gridcolor='#1e2130')
+                st.plotly_chart(fig_cw)
+            else:
+                st.info('No significant call walls found.')
 
-            tr1, tr2, tr3, tr4 = st.columns(4)
-            tr1.metric('Graded Forecasts', summ['n_graded'])
-            skill = summ['mean_skill']
-            tr2.metric(
-                'Mean Skill ($)',
-                f"{skill:+.2f}" if skill is not None else '—',
-                help='Avg ($) the model beat the naive spot baseline by. Positive = adds value.',
-            )
-            tr3.metric(
-                'Skill Rate',
-                f"{summ['skill_rate'] * 100:.0f}%" if summ['skill_rate'] is not None else '—',
-                help='Share of forecasts that beat the naive baseline.',
-            )
-            tr4.metric(
-                'Direction Accuracy',
-                f"{summ['dir_accuracy'] * 100:.0f}%" if summ['dir_accuracy'] is not None else '—',
-                help='Share of forecasts that called up/down vs spot correctly.',
-            )
+        with oi_col2:
+            st.markdown('**Put Walls (Support)**')
+            if walls.get('put_walls'):
+                pw_strikes = [w[0] for w in walls['put_walls']]
+                pw_oi = [w[1] for w in walls['put_walls']]
+                fig_pw = go.Figure(go.Bar(
+                    x=pw_strikes, y=pw_oi, marker_color='#26a69a', name='Put OI',
+                ))
+                fig_pw.add_vline(x=result['proxy_spot'],
+                                 line=dict(color='white', width=1, dash='dash'))
+                fig_pw.update_layout(
+                    height=280, paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
+                    font=dict(color='#fafafa'), margin=dict(t=10, b=20, l=0, r=0),
+                    xaxis_title='Strike', yaxis_title='Open Interest',
+                )
+                fig_pw.update_xaxes(gridcolor='#1e2130')
+                fig_pw.update_yaxes(gridcolor='#1e2130')
+                st.plotly_chart(fig_pw)
+            else:
+                st.info('No significant put walls found.')
 
-            tr5, tr6, tr7 = st.columns(3)
-            tr5.metric('Mean Abs Error', f"${summ['mean_abs_err']:.2f}")
-            tr6.metric('Naive Baseline Error', f"${summ['naive_mean_abs_err']:.2f}")
-            tr7.metric(
-                'In-Range Rate',
-                f"{summ['in_range_rate'] * 100:.0f}%" if summ['in_range_rate'] is not None else '—',
-                help='Share of realized closes that landed inside the [floor, ceiling] band.',
-            )
+        st.markdown('---')
 
-            # Progress over time: cumulative mean skill as the record grows.
-            prog = tkr_out.copy()
-            prog['pred_date'] = pd.to_datetime(prog['pred_date'], errors='coerce')
-            prog = prog.dropna(subset=['pred_date']).sort_values('pred_date')
-            prog['skill'] = pd.to_numeric(prog['skill'], errors='coerce')
-            prog = prog.dropna(subset=['skill'])
-            if len(prog) >= 2:
-                prog['Cumulative Mean Skill ($)'] = prog['skill'].expanding().mean()
-                chart = prog.set_index('pred_date')[['Cumulative Mean Skill ($)']]
-                st.markdown('**Progress over time** — cumulative mean skill vs the naive baseline')
-                st.line_chart(chart)
-                st.caption('Above zero and trending up = the forecast is learning to beat "do nothing."')
+        st.subheader('Sentiment & IV Skew')
+        pc = result['put_call_ratios']
+        skew_data = result['iv_skew']
 
-            with st.expander(f'Graded forecasts ({summ["n_graded"]})'):
-                show = tkr_out.copy()
-                show['pred_date'] = pd.to_datetime(show['pred_date'], errors='coerce')
-                show = show.sort_values('pred_date', ascending=False)
-                cols = [c for c in [
-                    'pred_date', 'expiry', 'spot_at_pred', 'estimated_close',
-                    'actual_close', 'close_abs_err', 'naive_abs_err', 'skill',
-                    'in_range', 'dir_correct',
-                ] if c in show.columns]
-                st.dataframe(show[cols].head(60), use_container_width=True)
-    except Exception as e:
-        st.warning(f'Could not load track record: {e}')
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric('P/C Ratio (OI)', f"{pc['pc_ratio_oi']:.2f}",
+                  delta=pc['oi_bias'].title())
+        s2.metric('P/C Ratio (Volume)', f"{pc['pc_ratio_volume']:.2f}",
+                  delta=pc['volume_bias'].title())
+        s3.metric('IV Skew Ratio', f"{skew_data['skew_ratio']:.2f}",
+                  delta=skew_data['skew_bias'].title())
+        s4.metric('OTM Put IV / Call IV',
+                  f"{skew_data['otm_put_iv']*100:.1f}% / {skew_data['otm_call_iv']*100:.1f}%")
 
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION K: Signal Weights & Auto-Retune
-    # ══════════════════════════════════════════════════════════════════════
-    st.markdown('---')
-    st.subheader('Signal Weights & Auto-Retune')
-    st.caption('Current signal weights used for floor/ceiling/bias calculation. '
-               'Auto-retune analyzes prediction accuracy and proposes safer weight adjustments.')
+        # Sentiment interpretation
+        pc_note = ''
+        if pc['oi_bias'] == 'bearish':
+            pc_note = 'Elevated put OI suggests institutional hedging or bearish positioning.'
+        elif pc['oi_bias'] == 'bullish':
+            pc_note = 'Low put/call ratio suggests bullish sentiment — less hedging activity.'
+        if skew_data['skew_bias'] == 'bearish':
+            pc_note += ' High IV skew indicates institutions are paying up for downside protection.'
+        elif skew_data['skew_bias'] == 'bullish':
+            pc_note += ' Low IV skew suggests complacency — less demand for downside hedging.'
+        if pc_note:
+            st.caption(pc_note.strip())
 
-    # Display current weights with delta from baseline
-    wt_names = list(active_weights.keys())
-    wt_cols = st.columns(len(wt_names))
-    for i, name in enumerate(wt_names):
-        baseline_val = SIGNAL_WEIGHTS.get(name, active_weights[name])
-        delta = active_weights[name] - baseline_val
-        delta_str = f"{delta:+.3f}" if abs(delta) > 0.001 else None
-        wt_cols[i].metric(name.replace('_', ' ').title(), f"{active_weights[name]:.3f}", delta=delta_str)
+        s5, s6, s7, s8 = st.columns(4)
+        s5.metric('Total Call OI', f"{pc['call_oi_total']:,}")
+        s6.metric('Total Put OI', f"{pc['put_oi_total']:,}")
+        s7.metric('Total Call Volume', f"{pc['call_volume_total']:,}")
+        s8.metric('Total Put Volume', f"{pc['put_volume_total']:,}")
 
-    # Weight history
-    if _sheets_ok:
+        st.markdown('---')
+
+        with st.expander('Raw Options Chain Data'):
+            from options_fetcher import fetch_options_chain as _fetch_chain
+            raw_c, raw_p, _ = _fetch_chain(result['ticker'])
+            display_cols = ['strike', 'lastPrice', 'bid', 'ask',
+                            'volume', 'openInterest', 'impliedVolatility']
+            available_cols_c = [c for c in display_cols if c in raw_c.columns]
+            available_cols_p = [c for c in display_cols if c in raw_p.columns]
+
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                st.markdown('**Calls**')
+                if available_cols_c:
+                    st.dataframe(raw_c[available_cols_c].head(30))
+            with rc2:
+                st.markdown('**Puts**')
+                if available_cols_p:
+                    st.dataframe(raw_p[available_cols_p].head(30))
+
+    # ──────────────────────────────────────────────────────────────────────
+    # TAB 3 — Evidence & Accuracy: VRP, signal evidence, range validation
+    # ──────────────────────────────────────────────────────────────────────
+    with tab_evidence:
+        st.subheader('Variance Risk Premium Analysis')
+        st.caption('IV systematically overstates realized vol — this is the #1 edge for iron condor sellers')
+        vp1, vp2, vp3, vp4 = st.columns(4)
+        vp1.metric('Raw ATM IV', f"{vrp.get('iv', 0)*100:.1f}%")
+        vp2.metric('Parkinson RV (20d)', f"{vrp.get('rv_parkinson', 0)*100:.1f}%" if vrp.get('rv_parkinson') else 'N/A')
+        vp3.metric('VRP Ratio (RV/IV)', f"{vrp.get('scaling_factor', 0):.3f}")
+        vp4.metric('IV Overstatement', f"{vrp.get('vrp_pct', 0):.1f}%")
+
+        st.markdown('---')
+
+        st.subheader('Evidence Breakdown')
+        st.caption('Signal weights control directional bias voting only. Floor/ceiling uses the evidence-based IV + VRP pipeline.')
+
+        evidence_rows = []
+        for sig in result['signals']:
+            if sig['bias'] == 'bullish':
+                bias_display = 'Bullish'
+            elif sig['bias'] == 'bearish':
+                bias_display = 'Bearish'
+            else:
+                bias_display = 'Neutral'
+            evidence_rows.append({
+                'Signal': sig['name'].replace('_', ' ').title(),
+                'Bias': bias_display,
+                'Weight': f"{sig['weight']*100:.0f}%",
+                'Evidence': sig['evidence'],
+            })
+        st.dataframe(pd.DataFrame(evidence_rows))
+
+        st.markdown('---')
+
+        st.subheader('Range Accuracy — Historical Validation')
+        st.caption('Tests how often the predicted daily range contained the actual next-day close (using realized volatility as IV proxy)')
+        from strategies.fractal_indicators import compute_range_containment
+        price_ticker = result['resolved_ticker'] if result['proxy_used'] else result['ticker']
+        range_df = fetch_stock_data(price_ticker, period='1y')
+        if not range_df.empty:
+            containment = compute_range_containment(range_df, window=60)
+            ra1, ra2, ra3, ra4 = st.columns(4)
+            ra1.metric('Days Tested', containment['days_tested'])
+            c1s = containment['containment_1sigma_pct']
+            ra2.metric('1-Sigma Containment', f"{c1s:.1f}%",
+                       delta=f"{c1s - 68.3:+.1f}% vs expected 68.3%")
+            c2s = containment['containment_2sigma_pct']
+            ra3.metric('2-Sigma Containment', f"{c2s:.1f}%",
+                       delta=f"{c2s - 95.4:+.1f}% vs expected 95.4%")
+            # Accuracy grade
+            deviation = abs(c1s - 68.3) + abs(c2s - 95.4)
+            if deviation < 5:
+                grade = 'A — Excellent'
+            elif deviation < 10:
+                grade = 'B — Good'
+            elif deviation < 20:
+                grade = 'C — Fair'
+            else:
+                grade = 'D — Needs refinement'
+            ra4.metric('Calibration Grade', grade)
+
+            with st.expander('Daily Range Results (last 20 days)'):
+                if containment['daily_results']:
+                    range_rows = []
+                    for dr in containment['daily_results'][-20:]:
+                        range_rows.append({
+                            'Date': dr['date'].strftime('%Y-%m-%d') if hasattr(dr['date'], 'strftime') else str(dr['date'])[:10],
+                            'Close': f"${dr['close']:.2f}",
+                            'Next Close': f"${dr['next_close']:.2f}",
+                            '1-Sigma Range': f"${dr['range_low_1s']:.2f} — ${dr['range_high_1s']:.2f}",
+                            'In 1-Sigma': 'Yes' if dr['in_1sigma'] else 'No',
+                            'In 2-Sigma': 'Yes' if dr['in_2sigma'] else 'No',
+                        })
+                    st.dataframe(pd.DataFrame(range_rows))
+
+    # ──────────────────────────────────────────────────────────────────────
+    # TAB 4 — Track Record: live predictions, dealer-pin skill, auto-retune
+    # ──────────────────────────────────────────────────────────────────────
+    with tab_track:
+        st.subheader('Live Prediction Tracking')
+        st.caption('Historical log of predictions — compare predicted floor/ceiling vs actual closes')
         try:
-            wh_df = read_weight_history()
-            if not wh_df.empty:
-                with st.expander(f'Weight Change History ({len(wh_df)} changes)'):
-                    st.dataframe(wh_df)
-        except Exception:
-            pass
+            pred_df = read_predictions() if _sheets_ok else read_predictions_csv()
+            if not pred_df.empty:
+                ticker_preds = pred_df[pred_df['ticker'] == result['ticker']].tail(30)
+                if not ticker_preds.empty:
+                    scored_rows = []
+                    price_ticker = result['resolved_ticker'] if result['proxy_used'] else result['ticker']
+                    hist_df = fetch_stock_data(price_ticker, period='3mo')
+                    if not hist_df.empty and isinstance(hist_df.index, pd.DatetimeIndex):
+                        if hist_df.index.tz is not None:
+                            hist_df.index = hist_df.index.tz_localize(None)
+                        for _, pred in ticker_preds.iterrows():
+                            pred_date = pd.Timestamp(pred['date'])
+                            future = hist_df[hist_df.index > pred_date]
+                            if len(future) > 0:
+                                actual_close = float(future['Close'].iloc[0])
+                                in_range = pred['floor'] <= actual_close <= pred['ceiling']
+                                bias_correct = (
+                                    (pred['bias'] == 'BULLISH' and actual_close > pred['spot_price']) or
+                                    (pred['bias'] == 'BEARISH' and actual_close < pred['spot_price']) or
+                                    (pred['bias'] == 'NEUTRAL')
+                                )
+                                scored_rows.append({
+                                    'Date': str(pred['date'])[:10] if not pd.isna(pred['date']) else '',
+                                    'Spot': f"${pred['spot_price']:.2f}",
+                                    'Floor': f"${pred['floor']:.2f}",
+                                    'Ceiling': f"${pred['ceiling']:.2f}",
+                                    'Bias': pred['bias'],
+                                    'Actual Close': f"${actual_close:.2f}",
+                                    'In Range': 'Yes' if in_range else 'No',
+                                    'Bias Correct': 'Yes' if bias_correct else 'No',
+                                })
 
-    # Retune button
-    st.markdown('---')
-    retune_col1, retune_col2 = st.columns([1, 3])
-    with retune_col1:
-        retune_btn = st.button('Run Auto-Retune', key='retune_btn')
-    with retune_col2:
-        st.caption(
-            'Analyzes prediction accuracy over the last 90 days. '
-            'Requires 60+ days of data. Changes are capped at 15% per cycle. '
-            'All changes are validated on a holdout set before applying.'
-        )
-
-    if retune_btn:
-        from auto_retune import run_retune
-        with st.spinner('Running auto-retune analysis...'):
-            retune_pred = read_predictions() if _sheets_ok else read_predictions_csv()
-            retune_result = run_retune(retune_pred, active_weights)
-
-        if not retune_result["eligible"]:
-            st.warning(f'Not eligible for retuning: {retune_result["reason"]}')
-        else:
-            # Signal scores
-            if retune_result["signal_scores"]:
-                st.markdown('**Signal Accuracy Scores** (positive = signal improves accuracy)')
-                sc_cols = st.columns(len(retune_result["signal_scores"]))
-                for i, (name, score) in enumerate(retune_result["signal_scores"].items()):
-                    sc_cols[i].metric(name.replace('_', ' ').title(), f"{score:+.1f}%")
-
-            # Proposed weights
-            if retune_result["proposed_weights"]:
-                st.markdown('**Proposed Weight Changes**')
-                change_data = []
-                for name in active_weights:
-                    proposed_val = retune_result['proposed_weights'].get(name, active_weights[name])
-                    change_data.append({
-                        'Signal': name.replace('_', ' ').title(),
-                        'Current': f"{active_weights[name]:.4f}",
-                        'Proposed': f"{proposed_val:.4f}",
-                        'Change': f"{proposed_val - active_weights[name]:+.4f}",
-                    })
-                st.dataframe(pd.DataFrame(change_data))
-
-            # Holdout result
-            if retune_result["holdout_passed"]:
-                st.success(
-                    f'Holdout validation PASSED. '
-                    f'Baseline accuracy: {retune_result["baseline_accuracy"]:.1f}% | '
-                    f'Proposed accuracy: {retune_result["proposed_accuracy"]:.1f}%'
-                )
-                if _sheets_ok and st.button('Apply New Weights', key='apply_retune'):
-                    for name, old_val, new_val in retune_result["weight_changes"]:
-                        log_weight_change(
-                            name, old_val, new_val,
-                            reason=f"Auto-retune: holdout {retune_result['proposed_accuracy']:.1f}% "
-                                   f"vs baseline {retune_result['baseline_accuracy']:.1f}%"
-                        )
-                    st.success('Weights updated and logged to Google Sheets. Refresh to use new weights.')
-                elif not _sheets_ok:
-                    st.warning('Connect Google Sheets to persist weight changes across sessions.')
+                    if scored_rows:
+                        scored_disp = pd.DataFrame(scored_rows)
+                        range_acc = scored_disp['In Range'].value_counts().get('Yes', 0) / len(scored_disp) * 100
+                        bias_acc = scored_disp['Bias Correct'].value_counts().get('Yes', 0) / len(scored_disp) * 100
+                        lt1, lt2, lt3 = st.columns(3)
+                        lt1.metric('Predictions Tracked', len(scored_disp))
+                        lt2.metric('Range Accuracy', f"{range_acc:.0f}%")
+                        lt3.metric('Bias Accuracy', f"{bias_acc:.0f}%")
+                        st.dataframe(scored_disp)
+                    else:
+                        st.info(f'{len(ticker_preds)} prediction(s) logged for {result["ticker"]}. '
+                                'Accuracy scoring requires at least one subsequent trading day.')
+                else:
+                    st.info(f'No predictions logged yet for {result["ticker"]}. Click Analyze to start tracking.')
             else:
-                st.error(
-                    f'Holdout validation FAILED. Proposed weights did not improve accuracy. '
-                    f'Baseline: {retune_result["baseline_accuracy"]:.1f}% | '
-                    f'Proposed: {retune_result["proposed_accuracy"]:.1f}%'
+                st.info('No predictions recorded yet. Click Analyze to start tracking.')
+                st.caption('Data source: ' + ('Google Sheets' if _sheets_ok else 'Local CSV (connect Google Sheets for persistence)'))
+        except Exception as e:
+            st.warning(f'Could not load predictions: {e}')
+
+        # ── Dealer-Pin Close — Scored Track Record (item 2) ───────────────────
+        # Reads the durable, graded Outcomes ledger (Step 3) and shows whether the
+        # dealer-pin estimated close actually beats the naive "price stays at spot"
+        # baseline — net of nothing, just honest forecast-vs-realized error that
+        # grows one trading day at a time.
+        st.markdown('---')
+        st.subheader('Dealer-Pin Close — Track Record')
+        st.caption(
+            'Each matured forecast is scored against the realized close AND against '
+            'the naive "price just stays at spot" null model. Skill = naive error − '
+            'model error; positive means the dealer-pin estimate added value.'
+        )
+        try:
+            from track_record import summarize_track_record, join_predictions_outcomes
+
+            out_df = read_outcomes() if _sheets_ok else read_outcomes_csv()
+            tkr = result['ticker']
+            if out_df is not None and not out_df.empty and 'ticker' in out_df.columns:
+                tkr_out = out_df[out_df['ticker'].astype(str).str.upper() == tkr.upper()].copy()
+            else:
+                tkr_out = out_df if out_df is not None else pd.DataFrame()
+
+            summ = summarize_track_record(tkr_out)
+            if summ['n_graded'] == 0:
+                st.info(
+                    f'No graded forecasts for {tkr} yet. Forecasts are graded the day '
+                    'after their expiry closes — the track record fills in automatically '
+                    'as days mature.'
+                )
+            else:
+                beats = summ['beats_naive']
+                if beats:
+                    st.success(
+                        f"✅ Beats the naive baseline — mean error "
+                        f"${summ['mean_abs_err']:.2f} vs ${summ['naive_mean_abs_err']:.2f} "
+                        f"for \"stays at spot\" across {summ['n_graded']} graded forecast(s)."
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ Not yet beating the naive baseline — mean error "
+                        f"${summ['mean_abs_err']:.2f} vs ${summ['naive_mean_abs_err']:.2f} "
+                        f"for \"stays at spot\" across {summ['n_graded']} graded forecast(s)."
+                    )
+
+                tr1, tr2, tr3, tr4 = st.columns(4)
+                tr1.metric('Graded Forecasts', summ['n_graded'])
+                skill = summ['mean_skill']
+                tr2.metric(
+                    'Mean Skill ($)',
+                    f"{skill:+.2f}" if skill is not None else '—',
+                    help='Avg ($) the model beat the naive spot baseline by. Positive = adds value.',
+                )
+                tr3.metric(
+                    'Skill Rate',
+                    f"{summ['skill_rate'] * 100:.0f}%" if summ['skill_rate'] is not None else '—',
+                    help='Share of forecasts that beat the naive baseline.',
+                )
+                tr4.metric(
+                    'Direction Accuracy',
+                    f"{summ['dir_accuracy'] * 100:.0f}%" if summ['dir_accuracy'] is not None else '—',
+                    help='Share of forecasts that called up/down vs spot correctly.',
                 )
 
-            # Regime analysis
-            if retune_result.get("regime_adjustments"):
-                st.markdown('**Regime Analysis** (range tightening opportunities)')
-                regime_data = []
-                for regime, info in retune_result["regime_adjustments"].items():
-                    regime_data.append({
-                        'Regime': regime.replace('_', ' ').title(),
-                        'Accuracy': f"{info['accuracy']:.0f}%",
-                        'Range Scale': f"{info['range_scale']:.2f}x",
-                        'Avg Width %': f"{info['avg_range_width_pct']:.2f}%",
-                        'Samples': info['count'],
-                    })
-                st.dataframe(pd.DataFrame(regime_data))
+                tr5, tr6, tr7 = st.columns(3)
+                tr5.metric('Mean Abs Error', f"${summ['mean_abs_err']:.2f}")
+                tr6.metric('Naive Baseline Error', f"${summ['naive_mean_abs_err']:.2f}")
+                tr7.metric(
+                    'In-Range Rate',
+                    f"{summ['in_range_rate'] * 100:.0f}%" if summ['in_range_rate'] is not None else '—',
+                    help='Share of realized closes that landed inside the [floor, ceiling] band.',
+                )
+
+                # Progress over time: cumulative mean skill as the record grows.
+                prog = tkr_out.copy()
+                prog['pred_date'] = pd.to_datetime(prog['pred_date'], errors='coerce')
+                prog = prog.dropna(subset=['pred_date']).sort_values('pred_date')
+                prog['skill'] = pd.to_numeric(prog['skill'], errors='coerce')
+                prog = prog.dropna(subset=['skill'])
+                if len(prog) >= 2:
+                    prog['Cumulative Mean Skill ($)'] = prog['skill'].expanding().mean()
+                    chart = prog.set_index('pred_date')[['Cumulative Mean Skill ($)']]
+                    st.markdown('**Progress over time** — cumulative mean skill vs the naive baseline')
+                    st.line_chart(chart)
+                    st.caption('Above zero and trending up = the forecast is learning to beat "do nothing."')
+
+                with st.expander(f'Graded forecasts ({summ["n_graded"]})'):
+                    show = tkr_out.copy()
+                    show['pred_date'] = pd.to_datetime(show['pred_date'], errors='coerce')
+                    show = show.sort_values('pred_date', ascending=False)
+                    cols = [c for c in [
+                        'pred_date', 'expiry', 'spot_at_pred', 'estimated_close',
+                        'actual_close', 'close_abs_err', 'naive_abs_err', 'skill',
+                        'in_range', 'dir_correct',
+                    ] if c in show.columns]
+                    st.dataframe(show[cols].head(60), use_container_width=True)
+        except Exception as e:
+            st.warning(f'Could not load track record: {e}')
+
+        # ── Signal Weights & Auto-Retune ──────────────────────────────────
+        st.markdown('---')
+        st.subheader('Signal Weights & Auto-Retune')
+        st.caption('Current signal weights used for floor/ceiling/bias calculation. '
+                   'Auto-retune analyzes prediction accuracy and proposes safer weight adjustments.')
+
+        # Display current weights with delta from baseline
+        wt_names = list(active_weights.keys())
+        wt_cols = st.columns(len(wt_names))
+        for i, name in enumerate(wt_names):
+            baseline_val = SIGNAL_WEIGHTS.get(name, active_weights[name])
+            delta = active_weights[name] - baseline_val
+            delta_str = f"{delta:+.3f}" if abs(delta) > 0.001 else None
+            wt_cols[i].metric(name.replace('_', ' ').title(), f"{active_weights[name]:.3f}", delta=delta_str)
+
+        # Weight history
+        if _sheets_ok:
+            try:
+                wh_df = read_weight_history()
+                if not wh_df.empty:
+                    with st.expander(f'Weight Change History ({len(wh_df)} changes)'):
+                        st.dataframe(wh_df)
+            except Exception:
+                pass
+
+        # Retune button
+        st.markdown('---')
+        retune_col1, retune_col2 = st.columns([1, 3])
+        with retune_col1:
+            retune_btn = st.button('Run Auto-Retune', key='retune_btn')
+        with retune_col2:
+            st.caption(
+                'Analyzes prediction accuracy over the last 90 days. '
+                'Requires 60+ days of data. Changes are capped at 15% per cycle. '
+                'All changes are validated on a holdout set before applying.'
+            )
+
+        if retune_btn:
+            from auto_retune import run_retune
+            with st.spinner('Running auto-retune analysis...'):
+                retune_pred = read_predictions() if _sheets_ok else read_predictions_csv()
+                retune_result = run_retune(retune_pred, active_weights)
+
+            if not retune_result["eligible"]:
+                st.warning(f'Not eligible for retuning: {retune_result["reason"]}')
+            else:
+                # Signal scores
+                if retune_result["signal_scores"]:
+                    st.markdown('**Signal Accuracy Scores** (positive = signal improves accuracy)')
+                    sc_cols = st.columns(len(retune_result["signal_scores"]))
+                    for i, (name, score) in enumerate(retune_result["signal_scores"].items()):
+                        sc_cols[i].metric(name.replace('_', ' ').title(), f"{score:+.1f}%")
+
+                # Proposed weights
+                if retune_result["proposed_weights"]:
+                    st.markdown('**Proposed Weight Changes**')
+                    change_data = []
+                    for name in active_weights:
+                        proposed_val = retune_result['proposed_weights'].get(name, active_weights[name])
+                        change_data.append({
+                            'Signal': name.replace('_', ' ').title(),
+                            'Current': f"{active_weights[name]:.4f}",
+                            'Proposed': f"{proposed_val:.4f}",
+                            'Change': f"{proposed_val - active_weights[name]:+.4f}",
+                        })
+                    st.dataframe(pd.DataFrame(change_data))
+
+                # Holdout result
+                if retune_result["holdout_passed"]:
+                    st.success(
+                        f'Holdout validation PASSED. '
+                        f'Baseline accuracy: {retune_result["baseline_accuracy"]:.1f}% | '
+                        f'Proposed accuracy: {retune_result["proposed_accuracy"]:.1f}%'
+                    )
+                    if _sheets_ok and st.button('Apply New Weights', key='apply_retune'):
+                        for name, old_val, new_val in retune_result["weight_changes"]:
+                            log_weight_change(
+                                name, old_val, new_val,
+                                reason=f"Auto-retune: holdout {retune_result['proposed_accuracy']:.1f}% "
+                                       f"vs baseline {retune_result['baseline_accuracy']:.1f}%"
+                            )
+                        st.success('Weights updated and logged to Google Sheets. Refresh to use new weights.')
+                    elif not _sheets_ok:
+                        st.warning('Connect Google Sheets to persist weight changes across sessions.')
+                else:
+                    st.error(
+                        f'Holdout validation FAILED. Proposed weights did not improve accuracy. '
+                        f'Baseline: {retune_result["baseline_accuracy"]:.1f}% | '
+                        f'Proposed: {retune_result["proposed_accuracy"]:.1f}%'
+                    )
+
+                # Regime analysis
+                if retune_result.get("regime_adjustments"):
+                    st.markdown('**Regime Analysis** (range tightening opportunities)')
+                    regime_data = []
+                    for regime, info in retune_result["regime_adjustments"].items():
+                        regime_data.append({
+                            'Regime': regime.replace('_', ' ').title(),
+                            'Accuracy': f"{info['accuracy']:.0f}%",
+                            'Range Scale': f"{info['range_scale']:.2f}x",
+                            'Avg Width %': f"{info['avg_range_width_pct']:.2f}%",
+                            'Samples': info['count'],
+                        })
+                    st.dataframe(pd.DataFrame(regime_data))
