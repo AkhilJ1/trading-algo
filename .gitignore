@@ -1,5 +1,6 @@
 data/cache/
 data/predictions.csv
+data/outcomes.csv
 .streamlit/secrets.toml
 __pycache__/
 *.pyc
