@@ -640,6 +640,107 @@ def _compute_floor_ceiling(
     }
 
 
+def compute_dealer_pin_close(
+    spot: float,
+    max_pain: float,
+    gex_df: pd.DataFrame,
+    fractal_levels: dict,
+    iv_range: dict,
+    regime: str,
+) -> dict:
+    """
+    Estimate where dealers are incentivized to pin the underlying into expiry —
+    the close that leaves the most open interest out-of-the-money, i.e. the
+    "safest outcome" for the dealers who are short those options — shaped by
+    fractal structure and bounded by the IV-implied expected move.
+
+    This is NOT a fair-value forecast. It answers a narrower question: given
+    current dealer positioning (max-pain + gamma) and recent swing structure,
+    where does hedging flow most likely drag price by the close of `expiry`?
+
+    Mechanism:
+      1. Anchor on max-pain (most OI expires worthless) blended with the
+         dominant positive-gamma strike (the gamma magnet).
+      2. Pull spot toward that anchor by a fraction set by gamma regime
+         (long/positive gamma = sticky/mean-reverting = strong pin; short/
+         negative gamma = slippery/trending = weak pin) and fractal regime.
+      3. Bracket the result inside the nearest fractal support/resistance and
+         the IV-implied 1-sigma expected-move envelope (a pin the tape cannot
+         physically reach by the close is not a realistic close).
+    """
+    daily_em = iv_range.get('daily_expected_move') or (spot * 0.01)
+    horizon_em = iv_range.get('expected_move_1sigma') or daily_em
+    if horizon_em <= 0:
+        horizon_em = spot * 0.01
+
+    # 1. Gamma magnet + how dominant *positive* (sticky) gamma is.
+    pin_strike = None
+    gamma_strength = 0.5  # 0 = all short gamma (slippery), 1 = all long gamma (sticky)
+    if gex_df is not None and not gex_df.empty and 'net_gex' in gex_df.columns:
+        net = gex_df['net_gex']
+        total_abs = float(net.abs().sum())
+        if total_abs > 0:
+            gamma_strength = float(net[net > 0].sum() / total_abs)
+        pos_rows = gex_df[gex_df['net_gex'] > 0]
+        if not pos_rows.empty:
+            pin_strike = float(pos_rows.loc[pos_rows['net_gex'].idxmax(), 'strike'])
+
+    # 2. Pin anchor: max-pain blended with the gamma magnet. The stronger the
+    #    long-gamma regime, the more the gamma strike matters.
+    if pin_strike is not None:
+        w_gamma = 0.35 + 0.30 * gamma_strength  # 0.35 .. 0.65
+        pin_target = (1 - w_gamma) * max_pain + w_gamma * pin_strike
+    else:
+        pin_target = max_pain
+
+    # 3. Pull fraction from spot toward the pin by the close.
+    base_pull = 0.45
+    gamma_adj = 0.40 * (gamma_strength - 0.5) * 2.0  # -0.40 .. +0.40
+    regime_adj = {'choppy': 0.15, 'transitional': 0.0, 'trending': -0.20}.get(regime, 0.0)
+    pull = max(0.0, min(0.85, base_pull + gamma_adj + regime_adj))
+    estimate = spot + pull * (pin_target - spot)
+
+    # 4. Bracket by nearest fractal structure + the expected-move envelope.
+    sup = (fractal_levels.get('support_levels') or [[None, None]])[0][1]
+    res = (fractal_levels.get('resistance_levels') or [[None, None]])[0][1]
+    lo_bounds = [spot - horizon_em]
+    hi_bounds = [spot + horizon_em]
+    if sup is not None and sup < spot:
+        lo_bounds.append(sup)
+    if res is not None and res > spot:
+        hi_bounds.append(res)
+    lo = max(lo_bounds)   # tightest floor at/below spot
+    hi = min(hi_bounds)   # tightest ceiling at/above spot
+    if lo <= hi:
+        estimate = min(max(estimate, lo), hi)
+
+    # 5. Confidence: gamma dominance + max-pain/gamma agreement + reachability.
+    agree = 1.0
+    if pin_strike is not None and spot > 0:
+        agree = max(0.0, 1.0 - abs(pin_strike - max_pain) / (0.02 * spot))
+    reach = max(0.0, 1.0 - abs(pin_target - spot) / (2.0 * horizon_em))
+    confidence = 100.0 * (0.40 * gamma_strength + 0.30 * agree + 0.30 * reach)
+
+    drift = estimate - spot
+    half_band = 0.5 * daily_em
+    return {
+        'estimated_close': round(estimate, 2),
+        'estimate_low': round(estimate - half_band, 2),
+        'estimate_high': round(estimate + half_band, 2),
+        'pin_target': round(pin_target, 2),
+        'max_pain': round(max_pain, 2),
+        'gamma_pin_strike': round(pin_strike, 2) if pin_strike is not None else None,
+        'gamma_strength': round(gamma_strength, 2),
+        'gamma_regime': 'positive (sticky / pin)' if gamma_strength > 0.5 else 'negative (slippery / drift)',
+        'pull_fraction': round(pull, 2),
+        'drift_from_spot': round(drift, 2),
+        'drift_pct': round((drift / spot * 100.0), 2) if spot else 0.0,
+        'direction': 'up' if drift > 0.01 else ('down' if drift < -0.01 else 'flat'),
+        'confidence': round(confidence, 0),
+        'expiry_dte': iv_range.get('days_to_expiry'),
+    }
+
+
 def compute_composite_analysis(
     ticker: str,
     expiry: Optional[str] = None,
@@ -786,6 +887,13 @@ def compute_composite_analysis(
     floor = fc_result['floor']
     ceiling = fc_result['ceiling']
 
+    # 6b. Dealer-pin estimated close — where dealers are incentivized to pin
+    #     price into expiry (most OI expires OTM), shaped by fractal structure.
+    pin_close = compute_dealer_pin_close(
+        spot=spot, max_pain=max_pain_strike, gex_df=gex_df,
+        fractal_levels=fractal_levels, iv_range=iv_range, regime=regime,
+    )
+
     # 7. Bias via weighted vote (separate from range)
     bias, confidence = _compute_bias(signals)
 
@@ -811,6 +919,16 @@ def compute_composite_analysis(
         else:
             ranges_display[label] = r
 
+    # Scale the dealer-pin estimate's price-like fields for futures proxy.
+    pin_close_display = dict(pin_close)
+    if proxy_used and price_ratio > 1:
+        for k in ('estimated_close', 'estimate_low', 'estimate_high',
+                  'pin_target', 'max_pain', 'gamma_pin_strike'):
+            if pin_close_display.get(k) is not None:
+                pin_close_display[k] = round(pin_close_display[k] * price_ratio, 2)
+        pin_close_display['drift_from_spot'] = round(
+            pin_close['drift_from_spot'] * price_ratio, 2)
+
     return {
         'ticker': ticker.upper(),
         'resolved_ticker': resolved,
@@ -829,6 +947,8 @@ def compute_composite_analysis(
         'ceiling': round(display_ceiling, 2),
         'bias': bias,
         'confidence': round(confidence, 1),
+        # Where dealers are incentivized to pin price into expiry (item 4).
+        'estimated_close': pin_close_display,
         'ranges': ranges_display,
         'range_methodology': fc_result['methodology'],
         'vrp': vrp,

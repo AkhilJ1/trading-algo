@@ -1614,6 +1614,44 @@ elif page == '🔬 Fractal & Options':
     k5.metric('VRP Adj', f"IV overstates {vrp.get('vrp_pct', 0):.0f}%")
     k6.metric('Market Regime', result['market_regime'].title())
 
+    # ── Estimated Close (dealer pin) — item 4 ──────────────────────────────
+    # Where dealers are incentivized to settle price into expiry so the most
+    # open interest expires out-of-the-money (the "safest outcome" for the
+    # dealers short those options), anchored on max-pain + the gamma magnet,
+    # shaped by fractal structure and bounded by the 1σ expected move.
+    est = result.get('estimated_close')
+    if est and est.get('estimated_close') is not None:
+        st.subheader(f"Estimated Close — {result['expiry']} (dealer pin)")
+        _dir = est.get('direction', 'flat')
+        _arrow = '▲' if _dir == 'up' else ('▼' if _dir == 'down' else '◆')
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric(
+            'Est. Close',
+            f"${est['estimated_close']:.2f}",
+            delta=f"{_arrow} {est['drift_from_spot']:+.2f} ({est['drift_pct']:+.2f}%)",
+            delta_color='off',
+        )
+        p2.metric('Likely Range', f"${est['estimate_low']:.2f} — ${est['estimate_high']:.2f}")
+        p3.metric(
+            'Pin Target', f"${est['pin_target']:.2f}",
+            delta=f"Max pain ${est['max_pain']:.2f}", delta_color='off',
+        )
+        p4.metric(
+            'Pin Confidence', f"{est['confidence']:.0f}%",
+            delta=est.get('gamma_regime', ''), delta_color='off',
+        )
+        _gp = est.get('gamma_pin_strike')
+        st.caption(
+            "Where dealers are incentivized to settle so the most open interest "
+            f"expires out-of-the-money. Anchored on max-pain (${est['max_pain']:.2f})"
+            + (f" + gamma magnet (${_gp:.2f})" if _gp is not None else "")
+            + f", pulled {est['pull_fraction']*100:.0f}% from spot and bracketed by "
+            "fractal structure and the 1σ expected move. "
+            f"Horizon: {est.get('expiry_dte', '?')} DTE. "
+            "Strongest in positive-gamma (sticky) regimes; in negative-gamma "
+            "(slippery) regimes the pin is weak and price drifts."
+        )
+
     # Iron Condor Range Levels
     ranges = result.get('ranges', {})
     if ranges:
