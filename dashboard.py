@@ -1449,19 +1449,37 @@ elif page == '🔁 Backtest':
                     mc_fig.update_yaxes(gridcolor='#1e2130')
                     st.plotly_chart(mc_fig, use_container_width=True)
 
-        # ── Walk-Forward Validation ───────────────────────────────────────
-        with st.expander('Walk-Forward Validation'):
-            st.caption('Tests if strategy parameters are overfit by validating on unseen data.')
+        # ── Walk-Forward Validation + Alpha Scorecard ─────────────────────
+        with st.expander('Walk-Forward Validation & Alpha Scorecard'):
+            st.caption('Out-of-sample, net of transaction costs: does the edge beat '
+                       'buy & hold without being overfit? This is the backtested proof.')
             wf_ticker = st.text_input('Ticker for walk-forward', value=tickers[0], key='wf_ticker')
             wf_strat = st.selectbox('Strategy', STRATEGIES, key='wf_strat',
                                      index=STRATEGIES.index(selected_strategy))
             if st.button('Run Walk-Forward', key='wf_btn'):
-                with st.spinner('Running walk-forward analysis (8 folds)...'):
-                    from walk_forward import walk_forward_test
-                    wf = walk_forward_test(wf_ticker, wf_strat)
+                with st.spinner('Running walk-forward analysis (8 folds, net of costs)...'):
+                    from walk_forward import build_scorecard
+                    card = build_scorecard(wf_ticker, wf_strat)
+                    wf = card.get('walk_forward', {})
                 if 'error' in wf:
                     st.error(wf['error'])
                 else:
+                    # Verdict banner — the "is the alpha real?" gate.
+                    _cost_bps = card.get('commission_pct', 0.0) * 10_000
+                    if card['passed']:
+                        st.success(f"✅ {card['verdict']} — beats buy & hold out-of-sample, "
+                                   f"net of {_cost_bps:.0f} bps/side costs, without overfitting.")
+                    else:
+                        st.warning(f"⚠️ {card['verdict']} — "
+                                   + "; ".join(card['reasons']))
+
+                    sc1, sc2, sc3 = st.columns(3)
+                    sc1.metric('OOS Return (net)', f"{card['oos_return']:+.2f}%")
+                    sc2.metric('Buy & Hold', f"{card['oos_buy_hold']:+.2f}%")
+                    sc3.metric('OOS Alpha', f"{card['oos_alpha']:+.2f}%",
+                               delta='beats benchmark' if card['checks']['beats_benchmark'] else 'lags benchmark',
+                               delta_color='normal' if card['checks']['beats_benchmark'] else 'inverse')
+
                     wf1, wf2, wf3 = st.columns(3)
                     wf1.metric('Avg Train Sharpe', f"{wf['avg_train_sharpe']:.3f}")
                     wf2.metric('Avg Test Sharpe', f"{wf['avg_test_sharpe']:.3f}")
@@ -1476,7 +1494,9 @@ elif page == '🔁 Backtest':
                         st.error(f"Overfit Ratio: {overfit:.2f}x — Likely overfit")
 
                     folds_df = pd.DataFrame(wf['folds'])
-                    st.dataframe(folds_df[['fold','train_sharpe','test_sharpe','test_win_rate','test_return','test_trades']])
+                    st.dataframe(folds_df[['fold', 'train_sharpe', 'test_sharpe',
+                                           'test_win_rate', 'test_return', 'test_buy_hold',
+                                           'test_alpha', 'test_trades']])
 
         # ── Per-ticker / per-strategy trade logs ───────────────────────────
         with st.expander('Trade Logs'):
