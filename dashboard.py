@@ -1558,6 +1558,16 @@ elif page == '🔬 Fractal & Options':
         st.error(result['error'])
         st.stop()
 
+    # Data-freshness banner: after the close (or whenever the live chain is
+    # unusable) the pipeline serves the last-known-good snapshot. Tell the user
+    # plainly so a range built on yesterday's chain is never mistaken for live.
+    if result.get('stale'):
+        _asof = result.get('as_of') or 'the previous session'
+        st.warning(
+            f"Showing the **last-known options snapshot** (as of {_asof}). "
+            "The live chain is currently unavailable — the market is likely closed."
+        )
+
     # ══════════════════════════════════════════════════════════════════════
     # SECTION A: Bias Banner + Key Metrics
     # ══════════════════════════════════════════════════════════════════════
