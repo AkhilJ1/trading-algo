@@ -1,0 +1,4 @@
+# Dev/test-only dependencies. Not needed to run the pipeline; installed in CI to
+# run the pytest suite. Keep pinned for reproducible test runs.
+-r requirements.txt
+pytest==8.3.4
