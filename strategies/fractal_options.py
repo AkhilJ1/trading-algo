@@ -28,6 +28,8 @@ from config import (
     VRP_MIN_RATIO, VRP_MAX_RATIO, REGIME_SCALE,
     VIX_CONTANGO_SHRINK, VIX_BACKWARDATION_EXPAND,
     DEALER_BOUND_BLEND, CONFIDENCE_SIGMAS,
+    NEURAL_TOLERANCE_PCT, NEURAL_LOOKBACK, VECTOR_MAX_AGE,
+    NEURAL_BRACKET_MIN_STRENGTH,
 )
 from options_fetcher import fetch_options_chain, fetch_expiration_dates
 from strategies.fractal_indicators import (
@@ -35,6 +37,10 @@ from strategies.fractal_indicators import (
     get_recent_fractal_levels,
     calculate_fractal_dimension,
     classify_regime,
+    compute_vectors,
+    score_neural_levels,
+    nearest_neural,
+    confluence_score,
 )
 from data_fetcher import fetch_stock_data
 
@@ -647,6 +653,8 @@ def compute_dealer_pin_close(
     fractal_levels: dict,
     iv_range: dict,
     regime: str,
+    neurals: dict = None,
+    vectors: dict = None,
 ) -> dict:
     """
     Estimate where dealers are incentivized to pin the underlying into expiry —
@@ -701,6 +709,11 @@ def compute_dealer_pin_close(
     estimate = spot + pull * (pin_target - spot)
 
     # 4. Bracket by nearest fractal structure + the expected-move envelope.
+    #    Strong NEURAL zones and the active VECTORS (Fractal-Exchange-style
+    #    structure) tighten the bracket when present: a close that would have to
+    #    blow through a level that has rejected price repeatedly is not the most
+    #    likely pin. All of these only ever *tighten* the envelope, never widen
+    #    past spot ± expected move.
     sup = (fractal_levels.get('support_levels') or [[None, None]])[0][1]
     res = (fractal_levels.get('resistance_levels') or [[None, None]])[0][1]
     lo_bounds = [spot - horizon_em]
@@ -709,6 +722,30 @@ def compute_dealer_pin_close(
         lo_bounds.append(sup)
     if res is not None and res > spot:
         hi_bounds.append(res)
+
+    if neurals:
+        ns = nearest_neural(neurals.get('support_zones'), spot, 'support')
+        nr = nearest_neural(neurals.get('resistance_zones'), spot, 'resistance')
+        if ns and ns.get('strength', 0) >= NEURAL_BRACKET_MIN_STRENGTH and ns['center'] < spot:
+            lo_bounds.append(ns['center'])
+        if nr and nr.get('strength', 0) >= NEURAL_BRACKET_MIN_STRENGTH and nr['center'] > spot:
+            hi_bounds.append(nr['center'])
+
+    if vectors:
+        for vkey in ('support_vector', 'resistance_vector'):
+            v = vectors.get(vkey)
+            if not v:
+                continue
+            cv = v.get('current_value')
+            # Use a vector only in its *active* role: a held support vector as a
+            # floor, a capping resistance vector as a ceiling.
+            if cv is None:
+                continue
+            if v.get('role') == 'support' and cv < spot:
+                lo_bounds.append(cv)
+            elif v.get('role') == 'resistance' and cv > spot:
+                hi_bounds.append(cv)
+
     lo = max(lo_bounds)   # tightest floor at/below spot
     hi = min(hi_bounds)   # tightest ceiling at/above spot
     if lo <= hi:
@@ -804,6 +841,13 @@ def compute_composite_analysis(
     regime = classify_regime(current_fd)
     fractal_levels = get_recent_fractal_levels(df)
 
+    # 3b. Fractal-Exchange-style structure on the SAME pivots:
+    #     neurals = strength-weighted horizontal zones (multiple-bounce levels),
+    #     vectors = sloped dynamic support/resistance that flip on a cross.
+    neurals = score_neural_levels(
+        df, tolerance_pct=NEURAL_TOLERANCE_PCT, lookback=NEURAL_LOOKBACK)
+    vectors = compute_vectors(df, max_age=VECTOR_MAX_AGE)
+
     # 4. Options analytics
     gex_df = compute_gex_profile(calls, puts, spot, expiry_used)
     walls = compute_options_walls(calls, puts, spot)
@@ -857,6 +901,35 @@ def compute_composite_analysis(
         weights=active_w,
     ))
 
+    # Vectors (sloped dynamic S/R, flip-on-cross). A held support vector or a
+    # reclaimed resistance vector leans bullish; a capping resistance vector or
+    # a lost support vector leans bearish. Net the two active vectors.
+    _sv = vectors.get('support_vector')
+    _rv = vectors.get('resistance_vector')
+    _vec_bull = _vec_bear = 0
+    _vec_parts = []
+    if _sv:
+        if _sv['role'] == 'support':
+            _vec_bull += 1; _vec_parts.append(f"support vector held @ ${_sv['current_value']:.2f}")
+        else:
+            _vec_bear += 1; _vec_parts.append(f"support vector lost @ ${_sv['current_value']:.2f}")
+    if _rv:
+        if _rv['role'] == 'resistance':
+            _vec_bear += 1; _vec_parts.append(f"resistance vector caps @ ${_rv['current_value']:.2f}")
+        else:
+            _vec_bull += 1; _vec_parts.append(f"resistance vector reclaimed @ ${_rv['current_value']:.2f}")
+    if _vec_bull > _vec_bear:
+        vec_bias = 'bullish'
+    elif _vec_bear > _vec_bull:
+        vec_bias = 'bearish'
+    else:
+        vec_bias = 'neutral'
+    signals.append(_score_signal(
+        'vectors', float(_vec_bull - _vec_bear), vec_bias,
+        ' | '.join(_vec_parts) if _vec_parts else 'no active vectors',
+        weights=active_w,
+    ))
+
     # Put/Call ratio
     signals.append(_score_signal(
         'put_call_ratio', pc_ratios['pc_ratio_oi'], pc_ratios['oi_bias'],
@@ -892,6 +965,15 @@ def compute_composite_analysis(
     pin_close = compute_dealer_pin_close(
         spot=spot, max_pain=max_pain_strike, gex_df=gex_df,
         fractal_levels=fractal_levels, iv_range=iv_range, regime=regime,
+        neurals=neurals, vectors=vectors,
+    )
+
+    # 6c. Confluence read — how many independent structural/flow signals align at
+    #     the current price (Fractal-Exchange "high-probability" stack).
+    confluence = confluence_score(
+        spot=spot, vectors=vectors, neurals=neurals,
+        pc_bias=pc_ratios['oi_bias'],
+        gamma_strength=pin_close.get('gamma_strength'),
     )
 
     # 7. Bias via weighted vote (separate from range)
@@ -929,6 +1011,30 @@ def compute_composite_analysis(
         pin_close_display['drift_from_spot'] = round(
             pin_close['drift_from_spot'] * price_ratio, 2)
 
+    # Scale neural-zone and vector levels (computed in proxy price units) so the
+    # dashboard shows them on the same axis as the displayed (futures) price.
+    def _scale_price(v):
+        return round(v * price_ratio, 2) if (proxy_used and price_ratio > 1 and v is not None) else v
+
+    neurals_display = neurals
+    vectors_display = vectors
+    if proxy_used and price_ratio > 1:
+        neurals_display = {
+            side: [dict(z, center=_scale_price(z['center'])) for z in zones]
+            for side, zones in neurals.items()
+        }
+        vectors_display = {'spot': _scale_price(vectors.get('spot'))}
+        for vk in ('support_vector', 'resistance_vector'):
+            v = vectors.get(vk)
+            if v:
+                v = dict(v)
+                v['current_value'] = _scale_price(v['current_value'])
+                v['distance'] = _scale_price(v['distance'])
+                v['anchors'] = [(p, _scale_price(y)) for p, y in v['anchors']]
+                vectors_display[vk] = v
+            else:
+                vectors_display[vk] = None
+
     return {
         'ticker': ticker.upper(),
         'resolved_ticker': resolved,
@@ -962,6 +1068,10 @@ def compute_composite_analysis(
         'put_call_ratios': pc_ratios,
         'iv_skew': skew,
         'fractal_levels': fractal_levels,
+        # Fractal-Exchange-style structure (item 4 extension).
+        'neural_zones': neurals_display,
+        'vectors': vectors_display,
+        'confluence': confluence,
         'fractal_dimension': round(current_fd, 3),
         'market_regime': regime,
         'signals': signals,

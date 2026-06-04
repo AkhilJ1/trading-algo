@@ -1872,6 +1872,47 @@ elif page == '🔬 Fractal & Options':
                        row=1, col=1, annotation_text=f"Max Pain ${result['max_pain']:.0f} (info)",
                        annotation_position='left')
 
+    # Vectors — sloped dynamic support/resistance (Fractal-Exchange style),
+    # projected across the visible window on the proxy price axis. A crossed
+    # (flipped) vector is drawn dotted.
+    _vecs = result.get('vectors') or {}
+    _nbars = len(price_df)
+    for _vkey, _vcolor in (('support_vector', '#26a69a'), ('resistance_vector', '#ef5350')):
+        _v = _vecs.get(_vkey)
+        if not _v or _v.get('current_value') is None:
+            continue
+        _ry = _v['current_value'] / r_ratio if r_ratio > 1 else _v['current_value']
+        _slope = _v.get('slope_per_bar', 0.0)        # proxy units per bar
+        _ly = _ry - _slope * (_nbars - 1)
+        fig_frac.add_trace(go.Scatter(
+            x=[price_df.index[0], price_df.index[-1]], y=[_ly, _ry],
+            mode='lines', name=f"{_vkey.split('_')[0].title()} Vector ({_v.get('role')})",
+            line=dict(color=_vcolor, width=2,
+                      dash='dot' if _v.get('crossed') else 'solid'),
+        ), row=1, col=1)
+
+    # Neurals — strongest horizontal zones (multiple-bounce levels). Only draw
+    # zones that fall inside the visible price window so a strong-but-distant
+    # level doesn't compress the y-axis.
+    _neur = result.get('neural_zones') or {}
+    _vis_lo, _vis_hi = float(price_df['Low'].min()), float(price_df['High'].max())
+    for _z in (_neur.get('support_zones') or [])[:3]:
+        _yc = _z['center'] / r_ratio if r_ratio > 1 else _z['center']
+        if _z.get('strength', 0) < 2 or not (_vis_lo <= _yc <= _vis_hi):
+            continue
+        fig_frac.add_hline(y=_yc, line=dict(color='#26a69a', width=1),
+                           row=1, col=1,
+                           annotation_text=f"Neural S ${_z['center']:.0f} (×{_z['bounces']})",
+                           annotation_position='left')
+    for _z in (_neur.get('resistance_zones') or [])[:3]:
+        _yc = _z['center'] / r_ratio if r_ratio > 1 else _z['center']
+        if _z.get('strength', 0) < 2 or not (_vis_lo <= _yc <= _vis_hi):
+            continue
+        fig_frac.add_hline(y=_yc, line=dict(color='#ef5350', width=1),
+                           row=1, col=1,
+                           annotation_text=f"Neural R ${_z['center']:.0f} (×{_z['bounces']})",
+                           annotation_position='left')
+
     # Fractal dimension subplot
     if 'fractal_dimension' in price_df.columns:
         fig_frac.add_trace(go.Scatter(
@@ -1895,6 +1936,70 @@ elif page == '🔬 Fractal & Options':
     fig_frac.update_xaxes(gridcolor='#1e2130')
     fig_frac.update_yaxes(gridcolor='#1e2130')
     st.plotly_chart(fig_frac)
+
+    # ── Vectors, Neurals & Confluence (Fractal-Exchange-style read) ───────────
+    st.markdown('**Vectors, Neurals & Confluence**')
+    st.caption('Sloped vectors (flip role on a cross) + horizontal neural zones '
+               '(scored by repeated bounces) + options flow, tallied into a '
+               'confluence read — the "how many signals agree here" stack.')
+
+    conf = result.get('confluence') or {}
+    _dir = conf.get('direction', 'neutral')
+    _label = conf.get('label', 'low')
+    _aligned = max(conf.get('bull', 0), conf.get('bear', 0))
+    _total = conf.get('bull', 0) + conf.get('bear', 0)
+    _icon = {'bullish': '🟢', 'bearish': '🔴'}.get(_dir, '⚪')
+    _pin_txt = ' · sticky long-gamma (pin)' if conf.get('pin') else ' · slippery short-gamma'
+    _msg = (f"{_icon} **{_dir.title()} confluence — {_label.upper()}** "
+            f"({_aligned} of {_total} aligned){_pin_txt}")
+    if _label == 'high':
+        st.success(_msg)
+    elif _label == 'medium':
+        st.info(_msg)
+    else:
+        st.warning(_msg)
+
+    _vcol, _ncol = st.columns(2)
+    with _vcol:
+        st.markdown('**Vectors** (dynamic S/R)')
+        _vecs = result.get('vectors') or {}
+        _vrows = []
+        for _vkey, _vlabel in (('support_vector', 'Support-anchored'),
+                               ('resistance_vector', 'Resistance-anchored')):
+            _v = _vecs.get(_vkey)
+            if not _v:
+                continue
+            _vrows.append({
+                'Vector': _vlabel,
+                'Now @': f"${_v['current_value']:.2f}",
+                'Role': _v['role'] + (' (flipped)' if _v.get('crossed') else ''),
+                'Slope': _v.get('direction', ''),
+            })
+        if _vrows:
+            st.dataframe(pd.DataFrame(_vrows), hide_index=True)
+        else:
+            st.caption('No active vectors (need two recent same-type pivots).')
+
+    with _ncol:
+        st.markdown('**Neurals** (strongest zones)')
+        _neur = result.get('neural_zones') or {}
+        _nrows = []
+        for _z in (_neur.get('resistance_zones') or [])[:3]:
+            _nrows.append({'Zone': 'Resistance', 'Level': f"${_z['center']:.2f}",
+                           'Bounces': _z['bounces'], 'Strength': _z['strength']})
+        for _z in (_neur.get('support_zones') or [])[:3]:
+            _nrows.append({'Zone': 'Support', 'Level': f"${_z['center']:.2f}",
+                           'Bounces': _z['bounces'], 'Strength': _z['strength']})
+        if _nrows:
+            st.dataframe(pd.DataFrame(_nrows), hide_index=True)
+        else:
+            st.caption('No scored neural zones yet.')
+
+    if conf.get('factors'):
+        with st.expander('Confluence factors'):
+            for _f in conf['factors']:
+                _fi = {'bullish': '🟢', 'bearish': '🔴'}.get(_f['direction'], '⚪')
+                st.markdown(f"- {_fi} **{_f['name']}** — {_f['detail']}")
 
     st.markdown('---')
 
