@@ -54,6 +54,18 @@ def _fetch_vix():
     return None, None
 
 
+def _pin_close_fields(result: dict):
+    """Pull the dealer-pin forecast scalars we later grade (item 4)."""
+    pin = result.get("estimated_close")
+    if isinstance(pin, dict):
+        return (
+            pin.get("estimated_close"),
+            pin.get("pin_target"),
+            pin.get("max_pain", result.get("max_pain")),
+        )
+    return None, None, result.get("max_pain")
+
+
 def record_ticker(ticker: str, sheets_ok: bool) -> bool:
     """Run the analysis for one ticker and log a single prediction row."""
     ticker = ticker.upper()
@@ -65,6 +77,7 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
 
     vix_val, regime = _fetch_vix()
     gex_net = _net_gex(result)
+    est_close, pin_target, max_pain = _pin_close_fields(result)
 
     kwargs = dict(
         date_str=result.get("timestamp", "")[:10],
@@ -78,6 +91,9 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
         vix=vix_val,
         gex_net=gex_net,
         regime=regime if regime else result.get("market_regime"),
+        estimated_close=est_close,
+        pin_target=pin_target,
+        max_pain=max_pain,
     )
 
     logged = False
@@ -90,10 +106,11 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
         logged = log_prediction_csv(**kwargs)
 
     dest = "Google Sheets" if (sheets_ok and logged) else "local CSV"
+    est_str = f"  est-close ${est_close:.2f}" if est_close is not None else ""
     print(
         f"  [{ticker}] {kwargs['bias']} {kwargs['confidence']}%  "
         f"spot ${kwargs['spot_price']}  "
-        f"floor ${kwargs['floor']}  ceiling ${kwargs['ceiling']}  "
+        f"floor ${kwargs['floor']}  ceiling ${kwargs['ceiling']}{est_str}  "
         f"→ {dest if logged else 'FAILED'}"
     )
     return logged

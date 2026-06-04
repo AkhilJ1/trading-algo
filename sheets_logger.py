@@ -14,6 +14,7 @@ from config import (
     GSHEET_SPREADSHEET_NAME,
     GSHEET_PREDICTIONS_SHEET,
     GSHEET_WEIGHTS_SHEET,
+    GSHEET_OUTCOMES_SHEET,
     SIGNAL_WEIGHTS,
 )
 
@@ -22,12 +23,28 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# Point-in-time forecast snapshot. The first 12 columns are the original
+# schema; estimated_close / pin_target / max_pain were appended (item 4) so the
+# durable record captures the dealer-pin close forecast we later grade. New
+# columns are append-only and backward compatible — old rows simply read blank
+# for the trailing fields, and _ensure_sheet() rewrites row 1 on schema change.
 PREDICTION_HEADERS = [
     "date", "timestamp", "ticker", "spot_price", "floor", "ceiling",
     "bias", "confidence", "expiry", "vix", "gex_net", "regime",
+    "estimated_close", "pin_target", "max_pain",
 ]
 WEIGHT_HEADERS = [
     "date", "weight_name", "old_value", "new_value", "reason",
+]
+# Deferred grading of matured forecasts: one row per prediction once its
+# realized close is known. Joining Predictions↔Outcomes on (date, ticker)
+# yields the scored, point-in-time-honest track record.
+OUTCOME_HEADERS = [
+    "pred_date", "ticker", "expiry", "graded_at",
+    "spot_at_pred", "estimated_close", "floor", "ceiling",
+    "actual_close", "close_abs_err", "close_pct_err", "in_range",
+    "dir_predicted", "dir_actual", "dir_correct",
+    "naive_abs_err", "skill",
 ]
 
 # Module-level cache
@@ -105,24 +122,49 @@ def is_sheets_available() -> bool:
         return False
 
 
+def _num_or_blank(value, ndigits=2):
+    """Round a number for sheet storage, or '' if it is None/non-numeric."""
+    try:
+        if value is None:
+            return ""
+        return round(float(value), ndigits)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _prediction_row(
+    date_str, ticker, spot_price, floor, ceiling,
+    bias, confidence, expiry,
+    vix=None, gex_net=None, regime=None,
+    estimated_close=None, pin_target=None, max_pain=None,
+):
+    """Build a Predictions row in PREDICTION_HEADERS order (shared by sheet/CSV)."""
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    return [
+        date_str, now, ticker, round(spot_price, 2),
+        round(floor, 2), round(ceiling, 2),
+        bias, round(confidence, 1), expiry,
+        _num_or_blank(vix), _num_or_blank(gex_net), regime or "",
+        _num_or_blank(estimated_close), _num_or_blank(pin_target),
+        _num_or_blank(max_pain),
+    ]
+
+
 def log_prediction(
     date_str, ticker, spot_price, floor, ceiling,
     bias, confidence, expiry,
     vix=None, gex_net=None, regime=None,
+    estimated_close=None, pin_target=None, max_pain=None,
 ) -> bool:
     """Append one prediction row. Returns True on success."""
     try:
         ss = get_spreadsheet()
         ws = _ensure_sheet(ss, GSHEET_PREDICTIONS_SHEET, PREDICTION_HEADERS)
-        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        row = [
-            date_str, now, ticker, round(spot_price, 2),
-            round(floor, 2), round(ceiling, 2),
-            bias, round(confidence, 1), expiry,
-            round(vix, 2) if vix is not None else "",
-            round(gex_net, 2) if gex_net is not None else "",
-            regime or "",
-        ]
+        row = _prediction_row(
+            date_str, ticker, spot_price, floor, ceiling,
+            bias, confidence, expiry, vix, gex_net, regime,
+            estimated_close, pin_target, max_pain,
+        )
         ws.append_row(row, value_input_option="RAW")
         return True
     except Exception as e:
@@ -158,7 +200,8 @@ def read_predictions() -> pd.DataFrame:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        for col in ["spot_price", "floor", "ceiling", "confidence", "vix", "gex_net"]:
+        for col in ["spot_price", "floor", "ceiling", "confidence", "vix",
+                    "gex_net", "estimated_close", "pin_target", "max_pain"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         # Keep only the latest prediction per ticker per day
@@ -213,38 +256,44 @@ def get_current_weights() -> dict:
 
 # ── CSV Fallback ──────────────────────────────────────────────────────────
 
-def log_prediction_csv(
-    date_str, ticker, spot_price, floor, ceiling,
-    bias, confidence, expiry,
-    vix=None, gex_net=None, regime=None,
-) -> bool:
-    """Fallback: log prediction to local CSV."""
+def _data_path(filename):
+    return os.path.join(os.path.dirname(__file__), 'data', filename)
+
+
+def _append_csv(path, headers, row) -> bool:
+    """Append one row to a CSV, writing the header first if the file is new."""
     import csv
-    pred_file = os.path.join(os.path.dirname(__file__), 'data', 'predictions.csv')
-    os.makedirs(os.path.dirname(pred_file), exist_ok=True)
-    write_header = not os.path.exists(pred_file)
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_header = not os.path.exists(path)
     try:
-        with open(pred_file, 'a', newline='') as f:
+        with open(path, 'a', newline='') as f:
             writer = csv.writer(f)
             if write_header:
-                writer.writerow(PREDICTION_HEADERS)
-            writer.writerow([
-                date_str, now, ticker, round(spot_price, 2),
-                round(floor, 2), round(ceiling, 2),
-                bias, round(confidence, 1), expiry,
-                round(vix, 2) if vix is not None else "",
-                round(gex_net, 2) if gex_net is not None else "",
-                regime or "",
-            ])
+                writer.writerow(headers)
+            writer.writerow(row)
         return True
     except Exception:
         return False
 
 
+def log_prediction_csv(
+    date_str, ticker, spot_price, floor, ceiling,
+    bias, confidence, expiry,
+    vix=None, gex_net=None, regime=None,
+    estimated_close=None, pin_target=None, max_pain=None,
+) -> bool:
+    """Fallback: log prediction to local CSV."""
+    row = _prediction_row(
+        date_str, ticker, spot_price, floor, ceiling,
+        bias, confidence, expiry, vix, gex_net, regime,
+        estimated_close, pin_target, max_pain,
+    )
+    return _append_csv(_data_path('predictions.csv'), PREDICTION_HEADERS, row)
+
+
 def read_predictions_csv() -> pd.DataFrame:
     """Fallback: read predictions from local CSV."""
-    pred_file = os.path.join(os.path.dirname(__file__), 'data', 'predictions.csv')
+    pred_file = _data_path('predictions.csv')
     if os.path.exists(pred_file):
         try:
             df = pd.read_csv(pred_file)
@@ -253,3 +302,66 @@ def read_predictions_csv() -> pd.DataFrame:
         except Exception:
             pass
     return pd.DataFrame(columns=PREDICTION_HEADERS)
+
+
+# ── Outcomes (graded forecasts) ───────────────────────────────────────────
+
+def log_outcome(outcome: dict) -> bool:
+    """Append one graded-outcome row (keys = OUTCOME_HEADERS) to the sheet."""
+    try:
+        ss = get_spreadsheet()
+        ws = _ensure_sheet(ss, GSHEET_OUTCOMES_SHEET, OUTCOME_HEADERS)
+        ws.append_row(_outcome_row(outcome), value_input_option="RAW")
+        return True
+    except Exception as e:
+        print(f"[sheets_logger] Error logging outcome: {e}")
+        return False
+
+
+def log_outcome_csv(outcome: dict) -> bool:
+    """Fallback: append one graded-outcome row to local CSV."""
+    return _append_csv(_data_path('outcomes.csv'), OUTCOME_HEADERS, _outcome_row(outcome))
+
+
+def _outcome_row(outcome: dict):
+    """Serialize an outcome dict into OUTCOME_HEADERS order."""
+    return [outcome.get(h, "") for h in OUTCOME_HEADERS]
+
+
+def read_outcomes() -> pd.DataFrame:
+    """Read graded outcomes from the sheet (or local CSV when Sheets is absent)."""
+    try:
+        ss = get_spreadsheet()
+        ws = _ensure_sheet(ss, GSHEET_OUTCOMES_SHEET, OUTCOME_HEADERS)
+        data = ws.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=OUTCOME_HEADERS)
+        return _coerce_outcomes(pd.DataFrame(data))
+    except Exception as e:
+        print(f"[sheets_logger] Error reading outcomes: {e}")
+        return read_outcomes_csv()
+
+
+def read_outcomes_csv() -> pd.DataFrame:
+    """Fallback: read graded outcomes from local CSV."""
+    path = _data_path('outcomes.csv')
+    if os.path.exists(path):
+        try:
+            return _coerce_outcomes(pd.read_csv(path))
+        except Exception:
+            pass
+    return pd.DataFrame(columns=OUTCOME_HEADERS)
+
+
+def _coerce_outcomes(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize dtypes on an outcomes frame."""
+    if df.empty:
+        return df
+    if "pred_date" in df.columns:
+        df["pred_date"] = pd.to_datetime(df["pred_date"], errors="coerce")
+    for col in ["spot_at_pred", "estimated_close", "floor", "ceiling",
+                "actual_close", "close_abs_err", "close_pct_err",
+                "naive_abs_err", "skill"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df

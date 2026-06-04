@@ -1,8 +1,9 @@
 name: Daily Prediction Recorder
 
 # Records one SPY prediction data point per trading day to the Google Sheet
-# the dashboard reads from. Runs in GitHub's cloud, independent of any local
-# machine being awake.
+# the dashboard reads from, then grades any earlier forecasts whose expiry day
+# has since closed — building a scored, point-in-time-honest track record.
+# Runs in GitHub's cloud, independent of any local machine being awake.
 
 on:
   schedule:
@@ -76,6 +77,20 @@ jobs:
           SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
           SCHWAB_TOKEN_PATH: schwab_token.json
         run: python daily_record.py SPY
+
+      - name: Grade matured forecasts
+        # Fills in the realized close for any past forecast whose expiry day has
+        # now closed, appending one row per matured forecast to the Outcomes
+        # sheet. Idempotent (already-graded forecasts are skipped), so this is
+        # safe to run every day. This is what turns the prediction log into a
+        # scored, growing track record without any local machine involved.
+        env:
+          GOOGLE_SHEETS_CREDS: ${{ github.workspace }}/gcp_sa.json
+          DATA_PROVIDER: schwab
+          SCHWAB_API_KEY: ${{ secrets.SCHWAB_API_KEY }}
+          SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
+          SCHWAB_TOKEN_PATH: schwab_token.json
+        run: python grade_predictions.py
 
       - name: Clean up credentials
         if: always()

@@ -127,6 +127,14 @@ SCORECARD_MAX_OVERFIT = 2.00      # train/test Sharpe ratio below this
 GSHEET_SPREADSHEET_NAME = "TradingAlgoPredictions"
 GSHEET_PREDICTIONS_SHEET = "Predictions"
 GSHEET_WEIGHTS_SHEET = "Weights"
+GSHEET_OUTCOMES_SHEET = "Outcomes"   # graded forecasts → the scored track record
+
+# ── Track-Record Grading ─────────────────────────────────────────────────
+# A dealer-pin close forecast is only "skillful" if it beats the naive
+# assumption that price simply stays at the prediction-time spot. Skill =
+# naive_abs_err − model_abs_err (positive ⇒ the model added value). The store
+# also flags whether the realized close landed inside the [floor, ceiling] band.
+TRACK_RECORD_TICKER = "SPY"          # the one name we forward-test ("trained with one name")
 
 # ── Auto-Retune Safety Rails ─────────────────────────────────────────────
 RETUNE_MIN_DAYS = 60            # Minimum prediction history before retuning
