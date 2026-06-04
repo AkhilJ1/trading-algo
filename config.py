@@ -111,6 +111,18 @@ SCANNER_WEIGHTS = {
 # Monte Carlo Simulation
 MC_SIMULATIONS = 1000           # Number of reshuffles for Monte Carlo
 
+# ── Transaction Costs (for honest, net-of-cost backtests) ────────────────
+# Per-side cost as a fraction of notional: spread + slippage + commission.
+# The engine applies this on BOTH the buy and the sell, so the round-trip
+# drag is ~2x this. 5 bps/side (~10 bps round trip) is a conservative
+# assumption for a liquid ETF like SPY traded on daily bars.
+DEFAULT_COMMISSION_PCT = 0.0005   # 5 basis points per side
+
+# Out-of-sample scorecard pass/fail thresholds (the "is the alpha real?" gate)
+SCORECARD_MIN_OOS_SHARPE = 0.30   # OOS Sharpe must clear this, net of costs
+SCORECARD_MIN_OOS_ALPHA = 0.0     # OOS return must beat buy & hold (alpha > 0)
+SCORECARD_MAX_OVERFIT = 2.00      # train/test Sharpe ratio below this
+
 # ── Google Sheets Config ─────────────────────────────────────────────────
 GSHEET_SPREADSHEET_NAME = "TradingAlgoPredictions"
 GSHEET_PREDICTIONS_SHEET = "Predictions"
