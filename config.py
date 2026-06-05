@@ -137,6 +137,13 @@ GSHEET_SPREADSHEET_NAME = "TradingAlgoPredictions"
 GSHEET_PREDICTIONS_SHEET = "Predictions"
 GSHEET_WEIGHTS_SHEET = "Weights"
 GSHEET_OUTCOMES_SHEET = "Outcomes"   # graded forecasts → the scored track record
+GSHEET_CALIBRATION_SHEET = "Calibration"  # periodic range-engine calibration snapshots
+# Dedicated pre-open dealer-pin track record, kept separate from the after-close
+# Predictions/Outcomes so the two never collide (same SPY date) and the pre-open
+# pin gets its own clean, point-in-time-honest scorecard. The morning recorder
+# writes a forecast row; the evening grader fills in the realized close.
+GSHEET_PIN_FORECASTS_SHEET = "PinForecasts"
+GSHEET_PIN_OUTCOMES_SHEET = "PinOutcomes"
 
 # ── Track-Record Grading ─────────────────────────────────────────────────
 # A dealer-pin close forecast is only "skillful" if it beats the naive

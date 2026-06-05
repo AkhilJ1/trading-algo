@@ -79,6 +79,32 @@ def fetch_expiration_dates(ticker: str) -> List[str]:
     return get_provider().get_expirations(resolved)
 
 
+def fetch_live_spot(ticker: str, provider=None) -> Optional[float]:
+    """
+    Freshest available spot for `ticker`, including pre/post-market, or None.
+
+    This is the pre-open spot fix: before the 9:30 ET open, the daily bar for
+    today does not exist yet, so the normal spot path (last daily Close) returns
+    *yesterday's* settled close. A live quote (pre-market / overnight) is a far
+    better anchor for a pre-open dealer-pin estimate. Futures tickers resolve to
+    their options-tradeable ETF proxy first, so the price is in the same units
+    the analysis works in. Returns None when no live quote is available — the
+    caller then degrades to the daily-close spot, so the estimate is never
+    blocked, only sharpened when a quote exists.
+    """
+    resolved, _ = _resolve_ticker(ticker)
+    prov = provider if provider is not None else get_provider()
+    try:
+        px = prov.get_quote(resolved)
+    except Exception:
+        return None
+    try:
+        px = float(px)
+    except (TypeError, ValueError):
+        return None
+    return px if px > 0 else None
+
+
 def _load_latest_cache(
     resolved: str,
     original: str,

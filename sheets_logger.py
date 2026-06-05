@@ -15,6 +15,9 @@ from config import (
     GSHEET_PREDICTIONS_SHEET,
     GSHEET_WEIGHTS_SHEET,
     GSHEET_OUTCOMES_SHEET,
+    GSHEET_CALIBRATION_SHEET,
+    GSHEET_PIN_FORECASTS_SHEET,
+    GSHEET_PIN_OUTCOMES_SHEET,
     SIGNAL_WEIGHTS,
 )
 
@@ -45,6 +48,17 @@ OUTCOME_HEADERS = [
     "actual_close", "close_abs_err", "close_pct_err", "in_range",
     "dir_predicted", "dir_actual", "dir_correct",
     "naive_abs_err", "skill",
+]
+# Periodic, point-in-time-honest calibration snapshot of the evidence-based
+# range engine (range_calibration.py): how often each confidence band actually
+# contained the realized next-session close over a trailing window, plus the
+# out-of-sample width verdict. One row per scheduled run → a calibration drift
+# time series the dashboard / a human can watch without any local machine.
+CALIBRATION_HEADERS = [
+    "date", "ticker", "window", "n_days",
+    "cov_1sigma", "cov_1_5sigma", "cov_2sigma",
+    "calibration_error", "mean_width_pct",
+    "best_width", "baseline_test_error", "proposed_test_error", "improved",
 ]
 
 # Module-level cache
@@ -155,11 +169,17 @@ def log_prediction(
     bias, confidence, expiry,
     vix=None, gex_net=None, regime=None,
     estimated_close=None, pin_target=None, max_pain=None,
+    sheet=GSHEET_PREDICTIONS_SHEET,
 ) -> bool:
-    """Append one prediction row. Returns True on success."""
+    """Append one prediction row. Returns True on success.
+
+    `sheet` selects the destination worksheet so the same point-in-time forecast
+    schema can back both the after-close Predictions ledger and the dedicated
+    pre-open PinForecasts ledger without code duplication.
+    """
     try:
         ss = get_spreadsheet()
-        ws = _ensure_sheet(ss, GSHEET_PREDICTIONS_SHEET, PREDICTION_HEADERS)
+        ws = _ensure_sheet(ss, sheet, PREDICTION_HEADERS)
         row = _prediction_row(
             date_str, ticker, spot_price, floor, ceiling,
             bias, confidence, expiry, vix, gex_net, regime,
@@ -188,11 +208,11 @@ def log_weight_change(weight_name, old_value, new_value, reason) -> bool:
         return False
 
 
-def read_predictions() -> pd.DataFrame:
-    """Read all predictions from the sheet. Deduplicates to latest per ticker per day."""
+def read_predictions(sheet=GSHEET_PREDICTIONS_SHEET) -> pd.DataFrame:
+    """Read all predictions from `sheet`. Deduplicates to latest per ticker per day."""
     try:
         ss = get_spreadsheet()
-        ws = _ensure_sheet(ss, GSHEET_PREDICTIONS_SHEET, PREDICTION_HEADERS)
+        ws = _ensure_sheet(ss, sheet, PREDICTION_HEADERS)
         data = ws.get_all_records()
         if not data:
             return pd.DataFrame(columns=PREDICTION_HEADERS)
@@ -281,19 +301,20 @@ def log_prediction_csv(
     bias, confidence, expiry,
     vix=None, gex_net=None, regime=None,
     estimated_close=None, pin_target=None, max_pain=None,
+    path_name='predictions.csv',
 ) -> bool:
-    """Fallback: log prediction to local CSV."""
+    """Fallback: log prediction to a local CSV (`path_name` under data/)."""
     row = _prediction_row(
         date_str, ticker, spot_price, floor, ceiling,
         bias, confidence, expiry, vix, gex_net, regime,
         estimated_close, pin_target, max_pain,
     )
-    return _append_csv(_data_path('predictions.csv'), PREDICTION_HEADERS, row)
+    return _append_csv(_data_path(path_name), PREDICTION_HEADERS, row)
 
 
-def read_predictions_csv() -> pd.DataFrame:
-    """Fallback: read predictions from local CSV."""
-    pred_file = _data_path('predictions.csv')
+def read_predictions_csv(path_name='predictions.csv') -> pd.DataFrame:
+    """Fallback: read predictions from a local CSV (`path_name` under data/)."""
+    pred_file = _data_path(path_name)
     if os.path.exists(pred_file):
         try:
             df = pd.read_csv(pred_file)
@@ -306,11 +327,11 @@ def read_predictions_csv() -> pd.DataFrame:
 
 # ── Outcomes (graded forecasts) ───────────────────────────────────────────
 
-def log_outcome(outcome: dict) -> bool:
-    """Append one graded-outcome row (keys = OUTCOME_HEADERS) to the sheet."""
+def log_outcome(outcome: dict, sheet=GSHEET_OUTCOMES_SHEET) -> bool:
+    """Append one graded-outcome row (keys = OUTCOME_HEADERS) to `sheet`."""
     try:
         ss = get_spreadsheet()
-        ws = _ensure_sheet(ss, GSHEET_OUTCOMES_SHEET, OUTCOME_HEADERS)
+        ws = _ensure_sheet(ss, sheet, OUTCOME_HEADERS)
         ws.append_row(_outcome_row(outcome), value_input_option="RAW")
         return True
     except Exception as e:
@@ -318,9 +339,9 @@ def log_outcome(outcome: dict) -> bool:
         return False
 
 
-def log_outcome_csv(outcome: dict) -> bool:
-    """Fallback: append one graded-outcome row to local CSV."""
-    return _append_csv(_data_path('outcomes.csv'), OUTCOME_HEADERS, _outcome_row(outcome))
+def log_outcome_csv(outcome: dict, path_name='outcomes.csv') -> bool:
+    """Fallback: append one graded-outcome row to a local CSV (`path_name`)."""
+    return _append_csv(_data_path(path_name), OUTCOME_HEADERS, _outcome_row(outcome))
 
 
 def _outcome_row(outcome: dict):
@@ -328,23 +349,23 @@ def _outcome_row(outcome: dict):
     return [outcome.get(h, "") for h in OUTCOME_HEADERS]
 
 
-def read_outcomes() -> pd.DataFrame:
-    """Read graded outcomes from the sheet (or local CSV when Sheets is absent)."""
+def read_outcomes(sheet=GSHEET_OUTCOMES_SHEET, path_name='outcomes.csv') -> pd.DataFrame:
+    """Read graded outcomes from `sheet` (or local CSV when Sheets is absent)."""
     try:
         ss = get_spreadsheet()
-        ws = _ensure_sheet(ss, GSHEET_OUTCOMES_SHEET, OUTCOME_HEADERS)
+        ws = _ensure_sheet(ss, sheet, OUTCOME_HEADERS)
         data = ws.get_all_records()
         if not data:
             return pd.DataFrame(columns=OUTCOME_HEADERS)
         return _coerce_outcomes(pd.DataFrame(data))
     except Exception as e:
         print(f"[sheets_logger] Error reading outcomes: {e}")
-        return read_outcomes_csv()
+        return read_outcomes_csv(path_name=path_name)
 
 
-def read_outcomes_csv() -> pd.DataFrame:
-    """Fallback: read graded outcomes from local CSV."""
-    path = _data_path('outcomes.csv')
+def read_outcomes_csv(path_name='outcomes.csv') -> pd.DataFrame:
+    """Fallback: read graded outcomes from a local CSV (`path_name` under data/)."""
+    path = _data_path(path_name)
     if os.path.exists(path):
         try:
             return _coerce_outcomes(pd.read_csv(path))
@@ -365,3 +386,113 @@ def _coerce_outcomes(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
+
+
+# ── Calibration snapshots (range-engine drift tracking) ───────────────────
+
+def _calibration_row(snapshot: dict):
+    """Serialize a calibration snapshot dict into CALIBRATION_HEADERS order."""
+    return [snapshot.get(h, "") for h in CALIBRATION_HEADERS]
+
+
+def log_calibration(snapshot: dict) -> bool:
+    """Append one calibration snapshot row (keys = CALIBRATION_HEADERS) to the sheet."""
+    try:
+        ss = get_spreadsheet()
+        ws = _ensure_sheet(ss, GSHEET_CALIBRATION_SHEET, CALIBRATION_HEADERS)
+        ws.append_row(_calibration_row(snapshot), value_input_option="RAW")
+        return True
+    except Exception as e:
+        print(f"[sheets_logger] Error logging calibration: {e}")
+        return False
+
+
+def log_calibration_csv(snapshot: dict) -> bool:
+    """Fallback: append one calibration snapshot row to local CSV."""
+    return _append_csv(_data_path('calibration.csv'), CALIBRATION_HEADERS, _calibration_row(snapshot))
+
+
+def read_calibration() -> pd.DataFrame:
+    """Read calibration snapshots from the sheet (or local CSV when Sheets is absent)."""
+    try:
+        ss = get_spreadsheet()
+        ws = _ensure_sheet(ss, GSHEET_CALIBRATION_SHEET, CALIBRATION_HEADERS)
+        data = ws.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=CALIBRATION_HEADERS)
+        return _coerce_calibration(pd.DataFrame(data))
+    except Exception as e:
+        print(f"[sheets_logger] Error reading calibration: {e}")
+        return read_calibration_csv()
+
+
+def read_calibration_csv() -> pd.DataFrame:
+    """Fallback: read calibration snapshots from local CSV."""
+    path = _data_path('calibration.csv')
+    if os.path.exists(path):
+        try:
+            return _coerce_calibration(pd.read_csv(path))
+        except Exception:
+            pass
+    return pd.DataFrame(columns=CALIBRATION_HEADERS)
+
+
+def _coerce_calibration(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize dtypes on a calibration frame."""
+    if df.empty:
+        return df
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    for col in ["n_days", "cov_1sigma", "cov_1_5sigma", "cov_2sigma",
+                "calibration_error", "mean_width_pct", "best_width",
+                "baseline_test_error", "proposed_test_error"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+# ── Pre-open dealer-pin track record ──────────────────────────────────────
+# Thin wrappers over the (now sheet/path-parameterized) prediction + outcome
+# machinery, pointed at the dedicated PinForecasts / PinOutcomes stores. The
+# pre-open pin is a point-in-time forecast just like the after-close one — same
+# schema, same grader — it just lives in its own ledger so the two never
+# collide on the same SPY date and the pin gets a clean scorecard.
+
+def log_pin_forecast(**kwargs) -> bool:
+    """Append one pre-open pin forecast row to the PinForecasts sheet."""
+    return log_prediction(sheet=GSHEET_PIN_FORECASTS_SHEET, **kwargs)
+
+
+def log_pin_forecast_csv(**kwargs) -> bool:
+    """Fallback: append one pre-open pin forecast row to data/pin_forecasts.csv."""
+    return log_prediction_csv(path_name='pin_forecasts.csv', **kwargs)
+
+
+def read_pin_forecasts() -> pd.DataFrame:
+    """Read pre-open pin forecasts (latest per ticker per day) from the sheet."""
+    return read_predictions(sheet=GSHEET_PIN_FORECASTS_SHEET)
+
+
+def read_pin_forecasts_csv() -> pd.DataFrame:
+    """Fallback: read pre-open pin forecasts from data/pin_forecasts.csv."""
+    return read_predictions_csv(path_name='pin_forecasts.csv')
+
+
+def log_pin_outcome(outcome: dict) -> bool:
+    """Append one graded pin outcome row to the PinOutcomes sheet."""
+    return log_outcome(outcome, sheet=GSHEET_PIN_OUTCOMES_SHEET)
+
+
+def log_pin_outcome_csv(outcome: dict) -> bool:
+    """Fallback: append one graded pin outcome row to data/pin_outcomes.csv."""
+    return log_outcome_csv(outcome, path_name='pin_outcomes.csv')
+
+
+def read_pin_outcomes() -> pd.DataFrame:
+    """Read graded pin outcomes from the sheet (or local CSV when absent)."""
+    return read_outcomes(sheet=GSHEET_PIN_OUTCOMES_SHEET, path_name='pin_outcomes.csv')
+
+
+def read_pin_outcomes_csv() -> pd.DataFrame:
+    """Fallback: read graded pin outcomes from data/pin_outcomes.csv."""
+    return read_outcomes_csv(path_name='pin_outcomes.csv')

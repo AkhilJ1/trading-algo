@@ -10,7 +10,7 @@ data-health check and the option-chain meta can report the true source
 (Requirement 3 — know where every number came from).
 """
 
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -42,6 +42,36 @@ class FallbackProvider(DataProvider):
         except Exception:
             self.last_source[key] = None
             raise
+
+    def get_quote(self, ticker: str) -> Optional[float]:
+        """Live quote from primary, degrading to secondary, then None.
+
+        A usable quote is a positive float. Unlike the other routes this never
+        raises — a missing live quote is a soft miss (the caller falls back to
+        the daily close), not a pipeline failure.
+        """
+        def _usable(px) -> bool:
+            try:
+                return px is not None and float(px) > 0
+            except (TypeError, ValueError):
+                return False
+
+        try:
+            res = self.primary.get_quote(ticker)
+            if _usable(res):
+                self.last_source["quote"] = self.primary.name
+                return float(res)
+        except Exception:
+            pass
+        try:
+            res = self.secondary.get_quote(ticker)
+            if _usable(res):
+                self.last_source["quote"] = self.secondary.name
+                return float(res)
+        except Exception:
+            pass
+        self.last_source["quote"] = None
+        return None
 
     def get_price_history(self, ticker: str, period: str, interval: str) -> pd.DataFrame:
         return self._try(

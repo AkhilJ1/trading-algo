@@ -1,0 +1,162 @@
+name: Pre-Open Dealer-Pin
+
+# Records SPY's pre-open 0DTE dealer-pin close forecast every market morning,
+# then grades it against the realized close that same evening — a fully
+# autonomous, point-in-time-honest pre-open pin scorecard. No website button,
+# no local machine: everything runs in GitHub's cloud on a schedule.
+#
+# Two schedules, two jobs (gated on which cron fired so the right half runs):
+#   * 13:25 UTC Mon–Fri  → RECORD the pre-open pin (anchored on the live
+#     pre-market spot). 13:25 UTC is 09:25 ET in summer (EDT) and 08:25 ET in
+#     winter (EST) — comfortably before the 09:30 ET open year-round, while the
+#     overnight-settled option OI (max-pain + gamma) is already fixed.
+#   * 22:45 UTC Mon–Fri  → GRADE matured pins. Today's 0DTE expires at 16:00 ET
+#     (20:00 UTC EDT / 21:00 UTC EST); by 22:45 UTC the settled daily close is
+#     available, so the morning pin gets scored against reality.
+# GitHub cron is always UTC.
+
+on:
+  schedule:
+    - cron: "25 13 * * 1-5"   # pre-open: record the pin
+    - cron: "45 22 * * 1-5"   # after close: grade the pin
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Which half to run manually: record | grade"
+        required: false
+        default: "record"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preopen-pin
+  cancel-in-progress: false
+
+jobs:
+  record:
+    # Fires on the morning cron, or a manual dispatch with mode=record.
+    if: >-
+      github.event.schedule == '25 13 * * 1-5' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'record')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify credentials secret is present
+        env:
+          GCP_SA: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$GCP_SA" ]; then
+            echo "::warning::GCP_SERVICE_ACCOUNT secret is not set — the pin forecast will only be written to an ephemeral CSV on the runner. Add it under repo Settings -> Secrets and variables -> Actions for a durable record."
+          fi
+
+      - name: Write Google service-account credentials (if configured)
+        env:
+          GCP_SA: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          if [ -n "$GCP_SA" ]; then
+            printf '%s' "$GCP_SA" > "${{ github.workspace }}/gcp_sa.json"
+          fi
+
+      - name: Write Schwab token (only if secret is configured)
+        env:
+          SCHWAB_TOKEN: ${{ secrets.SCHWAB_TOKEN }}
+        run: |
+          if [ -n "$SCHWAB_TOKEN" ]; then
+            printf '%s' "$SCHWAB_TOKEN" > schwab_token.json
+            echo "Schwab token written — pre-market quote + chain primarily from Schwab (yfinance fallback)."
+          else
+            echo "No Schwab token secret — using yfinance only (pre-market via prepost minute bars)."
+          fi
+
+      - name: Record pre-open dealer-pin forecast
+        env:
+          GOOGLE_SHEETS_CREDS: ${{ github.workspace }}/gcp_sa.json
+          # Schwab primary with a silent yfinance fallback, so the pin is
+          # recorded even if the Schwab token has lapsed or no Schwab secret is
+          # configured. yfinance supplies the pre-market quote via prepost bars.
+          DATA_PROVIDER: schwab
+          SCHWAB_API_KEY: ${{ secrets.SCHWAB_API_KEY }}
+          SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
+          SCHWAB_TOKEN_PATH: schwab_token.json
+        run: python record_preopen_pin.py SPY
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f "${{ github.workspace }}/gcp_sa.json" schwab_token.json
+
+  grade:
+    # Fires on the evening cron, or a manual dispatch with mode=grade.
+    if: >-
+      github.event.schedule == '45 22 * * 1-5' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'grade')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify credentials secret is present
+        env:
+          GCP_SA: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$GCP_SA" ]; then
+            echo "::warning::GCP_SERVICE_ACCOUNT secret is not set — grading will read/write an ephemeral CSV on the runner only. Add it for a durable scorecard."
+          fi
+
+      - name: Write Google service-account credentials (if configured)
+        env:
+          GCP_SA: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          if [ -n "$GCP_SA" ]; then
+            printf '%s' "$GCP_SA" > "${{ github.workspace }}/gcp_sa.json"
+          fi
+
+      - name: Write Schwab token (only if secret is configured)
+        env:
+          SCHWAB_TOKEN: ${{ secrets.SCHWAB_TOKEN }}
+        run: |
+          if [ -n "$SCHWAB_TOKEN" ]; then
+            printf '%s' "$SCHWAB_TOKEN" > schwab_token.json
+            echo "Schwab token written — realized close primarily from Schwab (yfinance fallback)."
+          else
+            echo "No Schwab token secret — grading from yfinance only."
+          fi
+
+      - name: Grade matured pre-open pin forecasts
+        env:
+          GOOGLE_SHEETS_CREDS: ${{ github.workspace }}/gcp_sa.json
+          DATA_PROVIDER: schwab
+          SCHWAB_API_KEY: ${{ secrets.SCHWAB_API_KEY }}
+          SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
+          SCHWAB_TOKEN_PATH: schwab_token.json
+        run: python grade_pin_forecasts.py
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f "${{ github.workspace }}/gcp_sa.json" schwab_token.json
