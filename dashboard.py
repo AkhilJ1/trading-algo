@@ -1557,6 +1557,13 @@ elif page == '🔬 Fractal & Options':
         st.session_state.fo_result = None
 
     # ── Input row ──────────────────────────────────────────────────────────
+    def _fo_mark_expiry_changed():
+        # Picking a new expiry should behave like clicking Analyze. The selectbox
+        # fires this only on a real change, so we flag it and let the run block
+        # below re-fetch that expiry's chain on this same rerun — no more
+        # silently showing the previously-analyzed expiry's data.
+        st.session_state.fo_expiry_changed = True
+
     inp1, inp2, inp3 = st.columns([3, 2, 1])
     with inp1:
         fo_ticker = st.text_input('Ticker (stocks, ETFs, or ES=F / NQ=F / YM=F)',
@@ -1564,7 +1571,8 @@ elif page == '🔬 Fractal & Options':
     with inp2:
         expiries = fetch_expiration_dates(fo_ticker) if fo_ticker.strip() else []
         fo_expiry = st.selectbox('Options Expiry', ['Nearest'] + expiries[:10],
-                                  key='fo_expiry_select')
+                                  key='fo_expiry_select',
+                                  on_change=_fo_mark_expiry_changed)
     with inp3:
         st.write('')
         st.write('')
@@ -1585,9 +1593,13 @@ elif page == '🔬 Fractal & Options':
         active_weights = dict(SIGNAL_WEIGHTS)
 
     # ── Run analysis ───────────────────────────────────────────────────────
-    if analyze_btn and fo_ticker.strip():
+    # Re-run when the user clicks Analyze OR changes the expiry, so scrolling
+    # through expiries refreshes the chain (GEX, walls, max-pain, dealer pin)
+    # instead of silently showing the last-analyzed expiry's numbers.
+    expiry_changed = st.session_state.pop('fo_expiry_changed', False)
+    if (analyze_btn or expiry_changed) and fo_ticker.strip():
         exp_arg = None if fo_expiry == 'Nearest' else fo_expiry
-        with st.spinner(f'Analyzing {fo_ticker.upper()}... (options + fractals + GEX)'):
+        with st.spinner(f'Analyzing {fo_ticker.upper()} ({fo_expiry})... (options + fractals + GEX)'):
             result = compute_composite_analysis(
                 fo_ticker.strip().upper(), exp_arg, weights=active_weights,
             )
