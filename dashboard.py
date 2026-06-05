@@ -81,6 +81,29 @@ def load_full_data(ticker: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_range_calibration(ticker: str = 'SPY', period: str = '2y') -> dict:
+    """
+    Engine-true calibration of the evidence-based floor/ceiling range, cached 1h.
+
+    Replays the *actual* range engine over history (VIX as the point-in-time IV
+    proxy), grades realized next-session coverage per confidence sigma against
+    its Gaussian target, and runs the anchored out-of-sample width sweep. Returns
+    {'summary', 'sweep'} (both plain dicts) or {} on insufficient data.
+    """
+    import range_calibration as rc
+    price = fetch_stock_data(ticker, period=period)
+    if price is None or price.empty:
+        return {}
+    vix = fetch_stock_data('^VIX', period=period)
+    vix3m = fetch_stock_data('^VIX3M', period=period)
+    vix_s = vix['Close'] if vix is not None and not vix.empty else pd.Series(dtype=float)
+    v3_s = vix3m['Close'] if vix3m is not None and not vix3m.empty else None
+    res = rc.replay_and_summarize(price, vix_s, v3_s)
+    sweep = rc.sweep_parameters(price, vix_s, v3_s)
+    return {'summary': res['summary'], 'sweep': sweep}
+
+
 # ---------------------------------------------------------------------------
 # Date-range helpers
 # ---------------------------------------------------------------------------
@@ -2198,8 +2221,76 @@ elif page == '🔬 Fractal & Options':
 
         st.markdown('---')
 
-        st.subheader('Range Accuracy — Historical Validation')
-        st.caption('Tests how often the predicted daily range contained the actual next-day close (using realized volatility as IV proxy)')
+        # ── Range Engine Calibration — engine-true, out-of-sample ─────────────
+        # Replays the ACTUAL evidence-based floor/ceiling engine over SPY history
+        # (VIX as the point-in-time IV proxy), grades realized next-session
+        # coverage per sigma against its Gaussian target, and runs an anchored
+        # out-of-sample width sweep. This is the faithful backbone calibration:
+        # the same IV → VRP → regime → VIX-term pipeline production uses, with the
+        # non-replayable option-chain dealer overlay held neutral. SPY is the
+        # reference instrument (VIX is its vol index, and the forward-test ticker).
+        st.subheader('Range Engine Calibration — SPY (out-of-sample)')
+        st.caption('Replays the real floor/ceiling engine over SPY history (VIX as the IV proxy) and grades '
+                   'how often the next-session close actually landed inside each confidence band.')
+        calib = load_range_calibration('SPY', period='2y')
+        if calib and calib.get('summary', {}).get('n_days', 0) > 0:
+            summ = calib['summary']
+            sweep = calib.get('sweep', {})
+            cov = summ['coverage']
+            tgt = summ['targets']
+            cal_err = summ.get('calibration_error')
+            cc1, cc2, cc3, cc4 = st.columns(4)
+            cc1.metric('Days Graded', summ['n_days'])
+            c1 = cov.get('1sigma')
+            t1 = tgt.get('1sigma', 68.27)
+            if c1 is not None:
+                cc2.metric('1σ Coverage', f"{c1:.1f}%", delta=f"{c1 - t1:+.1f}% vs {t1:.1f}%")
+            c2 = cov.get('2sigma')
+            t2 = tgt.get('2sigma', 95.45)
+            if c2 is not None:
+                cc3.metric('2σ Coverage', f"{c2:.1f}%", delta=f"{c2 - t2:+.1f}% vs {t2:.1f}%")
+            if cal_err is not None:
+                cc4.metric('Calibration Error', f"{cal_err:.2f}",
+                           help='Mean |coverage − target| across sigmas. Lower = better calibrated.')
+
+            label_disp = {'1sigma': '1σ (target 68.3%)', '1_5sigma': '1.5σ (target 86.6%)',
+                          '2sigma': '2σ (target 95.4%)'}
+            cov_rows = []
+            for label in cov:
+                target = tgt.get(label)
+                cov_rows.append({
+                    'Confidence': label_disp.get(label, label),
+                    'Realized Coverage': f"{cov[label]:.1f}%",
+                    'Target': f"{target:.1f}%" if target is not None else '—',
+                    'Gap': f"{cov[label] - target:+.1f}%" if target is not None else '—',
+                })
+            st.dataframe(pd.DataFrame(cov_rows))
+            if summ.get('mean_width_pct') is not None:
+                st.caption(f"Mean 1σ band width: {summ['mean_width_pct']:.2f}% of spot — "
+                           'how tight the honest range is.')
+
+            # Out-of-sample width verdict (anchored train/test, like auto-retune).
+            if sweep and 'error' not in sweep:
+                if sweep.get('improved'):
+                    st.success(
+                        f"Out-of-sample tuner: widen bands ×{sweep['best_width']:.2f} — "
+                        f"holdout calibration error {sweep['baseline_test_error']:.2f} → "
+                        f"{sweep['proposed_test_error']:.2f}.")
+                else:
+                    st.info(
+                        f"Out-of-sample tuner: keep ×1.00 — the in-sample-best ×{sweep['best_width']:.2f} "
+                        f"did not beat baseline on the holdout "
+                        f"(error {sweep['baseline_test_error']:.2f}). No overfit applied.")
+            st.caption('Engine-true backbone: IV → VRP shrink → regime / VIX-term scaling, with the '
+                       'option-chain dealer overlay held neutral (not replayable without point-in-time chains).')
+        else:
+            st.info('Not enough SPY/VIX history to calibrate the range engine yet.')
+
+        st.markdown('---')
+
+        st.subheader('Range Accuracy — Realized-Vol Cross-Check')
+        st.caption('Secondary check on the analyzed ticker: how often the predicted daily range contained the '
+                   'actual next-day close, using realized volatility (not the engine) as the IV proxy.')
         from strategies.fractal_indicators import compute_range_containment
         price_ticker = result['resolved_ticker'] if result['proxy_used'] else result['ticker']
         range_df = fetch_stock_data(price_ticker, period='1y')
