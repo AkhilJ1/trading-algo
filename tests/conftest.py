@@ -62,14 +62,21 @@ class FakeProvider:
     """
 
     def __init__(self, name="fake", expirations=None, chain=None, price=None,
-                 last_source=None, raise_on=None):
+                 last_source=None, raise_on=None, quote=None):
         self.name = name
         self._expirations = expirations if expirations is not None else ["2026-06-19"]
         self._chain = chain
         self._price = price if price is not None else make_price_df()
         self.last_source = last_source if last_source is not None else {}
         self._raise_on = raise_on or set()
+        self._quote = quote
         self.calls = []
+
+    def get_quote(self, ticker):
+        self.calls.append(("get_quote", ticker))
+        if "quote" in self._raise_on:
+            raise RuntimeError("boom quote")
+        return self._quote
 
     def get_expirations(self, ticker):
         self.calls.append(("get_expirations", ticker))

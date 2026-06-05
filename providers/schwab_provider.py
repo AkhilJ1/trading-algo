@@ -32,7 +32,7 @@ credentials. The yfinance provider remains the safety net (see DATA_PROVIDER).
 import os
 import re
 from datetime import date, datetime, timedelta
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
@@ -118,6 +118,50 @@ class SchwabProvider(DataProvider):
         from schwab.auth import client_from_token_file
         self._client = client_from_token_file(token_path, api_key, app_secret)
         return self._client
+
+    # ── live quote (incl. extended hours) ──────────────────────────────
+    def get_quote(self, ticker: str) -> Optional[float]:
+        """Freshest trade price for `ticker`, including pre/post-market.
+
+        Schwab's /quotes endpoint carries an extended-hours-aware ``lastPrice``,
+        so a pre-open call returns the live pre-market print rather than the
+        prior daily close. Best-effort: any failure returns None and the
+        FallbackProvider degrades to yfinance, which degrades to the daily
+        close — the pin is still recorded either way.
+        """
+        symbol = _translate_symbol(ticker)
+        try:
+            client = self._get_client()
+            resp = client.get_quote(symbol)
+            data = resp.json()
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        # Response shape: {'SPY': {'quote': {...}, 'regular': {...}}, ...}
+        node = data.get(symbol) or (next(iter(data.values())) if data else None)
+        if not isinstance(node, dict):
+            return None
+        quote = node.get("quote", node) if isinstance(node.get("quote", None), dict) else node
+
+        for key in ("lastPrice", "mark", "regularMarketLastPrice", "closePrice"):
+            val = quote.get(key)
+            try:
+                px = float(val)
+            except (TypeError, ValueError):
+                continue
+            if px > 0:
+                return px
+        # Last resort: bid/ask midpoint if both are present and sane.
+        try:
+            bid = float(quote.get("bidPrice"))
+            ask = float(quote.get("askPrice"))
+            if bid > 0 and ask > 0:
+                return (bid + ask) / 2.0
+        except (TypeError, ValueError):
+            pass
+        return None
 
     # ── price history ──────────────────────────────────────────────────
     def get_price_history(

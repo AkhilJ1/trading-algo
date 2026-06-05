@@ -26,7 +26,7 @@ translates *its own* wire symbols internally and still accepts the app's symbols
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
@@ -36,6 +36,23 @@ class DataProvider(ABC):
 
     #: short identifier, e.g. "yfinance" or "schwab"
     name: str = "abstract"
+
+    def get_quote(self, ticker: str) -> Optional[float]:
+        """
+        Return the freshest available trade price for `ticker`, *including
+        extended hours* — the pre-market / overnight price when the regular
+        session has not opened yet.
+
+        This is what lets a pre-open run anchor on a live-ish spot instead of
+        yesterday's settled daily close (the daily bar for today does not exist
+        before the 9:30 ET open). Return None if no live quote is available; the
+        caller then falls back to the daily close.
+
+        Concrete backends override this. The default returns None so a provider
+        that has no live-quote endpoint stays valid without any change (the
+        whole feature degrades gracefully to the prior daily-close behavior).
+        """
+        return None
 
     @abstractmethod
     def get_price_history(

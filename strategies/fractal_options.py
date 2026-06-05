@@ -782,10 +782,19 @@ def compute_composite_analysis(
     ticker: str,
     expiry: Optional[str] = None,
     weights: dict = None,
+    spot_override: Optional[float] = None,
 ) -> dict:
     """
     Master analysis function. Runs all sub-analyses and produces
     the composite result for the dashboard.
+
+    `spot_override` (optional): replace the data-layer spot (the last daily
+    Close) with a caller-supplied price *in the resolved/proxy ticker's units*.
+    This is the pre-open path — before the 9:30 ET open the daily bar for today
+    does not exist, so the normal spot is yesterday's settled close; passing a
+    live pre-market quote here re-centers the whole analysis (max-pain side,
+    GEX, IV envelope, floor/ceiling, and the dealer-pin pull) on the price the
+    market is actually at, which is what makes a pre-open pin estimate honest.
     """
     # 1. Fetch options chain — skip expiries with no usable OI/IV data
     calls, puts, meta = fetch_options_chain(ticker, expiry)
@@ -793,6 +802,15 @@ def compute_composite_analysis(
         return {'error': f'No options data for {ticker}'}
 
     spot = meta['spot_price']
+    # Pre-open override: anchor on the supplied live spot instead of the prior
+    # daily close. Only honored when it is a sane positive number.
+    spot_source = 'daily_close'
+    try:
+        if spot_override is not None and float(spot_override) > 0:
+            spot = float(spot_override)
+            spot_source = 'live_override'
+    except (TypeError, ValueError):
+        pass
     resolved = meta['resolved_ticker']
     proxy_used = meta['proxy_used']
     price_ratio = meta.get('price_ratio', 1.0)
@@ -1042,6 +1060,8 @@ def compute_composite_analysis(
         'spot_price': round(display_spot, 2),
         'proxy_spot': round(spot, 2),
         'price_ratio': round(price_ratio, 4),
+        # 'daily_close' (normal) or 'live_override' (pre-open live spot anchor).
+        'spot_source': spot_source,
         'timestamp': date.today().isoformat(),
         'expiry': expiry_used,
         # Provenance from the data layer so the UI can show whether this is a

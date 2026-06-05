@@ -2,6 +2,8 @@ data/cache/
 data/predictions.csv
 data/outcomes.csv
 data/calibration.csv
+data/pin_forecasts.csv
+data/pin_outcomes.csv
 .streamlit/secrets.toml
 __pycache__/
 *.pyc
