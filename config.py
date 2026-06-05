@@ -137,6 +137,7 @@ GSHEET_SPREADSHEET_NAME = "TradingAlgoPredictions"
 GSHEET_PREDICTIONS_SHEET = "Predictions"
 GSHEET_WEIGHTS_SHEET = "Weights"
 GSHEET_OUTCOMES_SHEET = "Outcomes"   # graded forecasts → the scored track record
+GSHEET_CALIBRATION_SHEET = "Calibration"  # periodic range-engine calibration snapshots
 
 # ── Track-Record Grading ─────────────────────────────────────────────────
 # A dealer-pin close forecast is only "skillful" if it beats the naive

@@ -1,0 +1,89 @@
+name: Weekly Range Calibration
+
+# Records one range-engine calibration snapshot per week to the Google Sheet
+# the dashboard reads from: how often each confidence band actually contained
+# the realized next-session close over a trailing 2y window (VIX as the IV
+# proxy), plus the out-of-sample width verdict. This builds a calibration-drift
+# time series so we can see if the floor/ceiling engine is staying honest —
+# entirely in GitHub's cloud, independent of any local machine being awake.
+
+on:
+  schedule:
+    # 23:00 UTC every Saturday — markets are closed, so a full trailing window
+    # of settled daily bars is available. GitHub cron is always UTC.
+    - cron: "0 23 * * 6"
+  workflow_dispatch:
+    inputs:
+      window:
+        description: "Trailing history window (e.g. 2y, 5y)"
+        required: false
+        default: "2y"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: range-calibration
+  cancel-in-progress: false
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify credentials secret is present
+        env:
+          GCP_SA: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$GCP_SA" ]; then
+            echo "::warning::GCP_SERVICE_ACCOUNT secret is not set — the snapshot will only be written to an ephemeral CSV on the runner. Add it under repo Settings -> Secrets and variables -> Actions for a durable record."
+          fi
+
+      - name: Write Google service-account credentials (if configured)
+        env:
+          GCP_SA: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          if [ -n "$GCP_SA" ]; then
+            printf '%s' "$GCP_SA" > "${{ github.workspace }}/gcp_sa.json"
+          fi
+
+      - name: Write Schwab token (only if secret is configured)
+        env:
+          SCHWAB_TOKEN: ${{ secrets.SCHWAB_TOKEN }}
+        run: |
+          if [ -n "$SCHWAB_TOKEN" ]; then
+            printf '%s' "$SCHWAB_TOKEN" > schwab_token.json
+            echo "Schwab token written — calibrating primarily from Schwab (yfinance fallback)."
+          else
+            echo "No Schwab token secret — calibrating from yfinance only."
+          fi
+
+      - name: Record range-engine calibration snapshot
+        env:
+          GOOGLE_SHEETS_CREDS: ${{ github.workspace }}/gcp_sa.json
+          # Same provider chain as the daily recorder: Schwab primary with a
+          # silent yfinance fallback, so the calibration never goes dark if the
+          # Schwab token has lapsed or no Schwab secret is configured.
+          DATA_PROVIDER: schwab
+          SCHWAB_API_KEY: ${{ secrets.SCHWAB_API_KEY }}
+          SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
+          SCHWAB_TOKEN_PATH: schwab_token.json
+        run: python record_calibration.py SPY "${{ github.event.inputs.window || '2y' }}"
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f "${{ github.workspace }}/gcp_sa.json" schwab_token.json

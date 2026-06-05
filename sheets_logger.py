@@ -15,6 +15,7 @@ from config import (
     GSHEET_PREDICTIONS_SHEET,
     GSHEET_WEIGHTS_SHEET,
     GSHEET_OUTCOMES_SHEET,
+    GSHEET_CALIBRATION_SHEET,
     SIGNAL_WEIGHTS,
 )
 
@@ -45,6 +46,17 @@ OUTCOME_HEADERS = [
     "actual_close", "close_abs_err", "close_pct_err", "in_range",
     "dir_predicted", "dir_actual", "dir_correct",
     "naive_abs_err", "skill",
+]
+# Periodic, point-in-time-honest calibration snapshot of the evidence-based
+# range engine (range_calibration.py): how often each confidence band actually
+# contained the realized next-session close over a trailing window, plus the
+# out-of-sample width verdict. One row per scheduled run → a calibration drift
+# time series the dashboard / a human can watch without any local machine.
+CALIBRATION_HEADERS = [
+    "date", "ticker", "window", "n_days",
+    "cov_1sigma", "cov_1_5sigma", "cov_2sigma",
+    "calibration_error", "mean_width_pct",
+    "best_width", "baseline_test_error", "proposed_test_error", "improved",
 ]
 
 # Module-level cache
@@ -362,6 +374,69 @@ def _coerce_outcomes(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["spot_at_pred", "estimated_close", "floor", "ceiling",
                 "actual_close", "close_abs_err", "close_pct_err",
                 "naive_abs_err", "skill"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+# ── Calibration snapshots (range-engine drift tracking) ───────────────────
+
+def _calibration_row(snapshot: dict):
+    """Serialize a calibration snapshot dict into CALIBRATION_HEADERS order."""
+    return [snapshot.get(h, "") for h in CALIBRATION_HEADERS]
+
+
+def log_calibration(snapshot: dict) -> bool:
+    """Append one calibration snapshot row (keys = CALIBRATION_HEADERS) to the sheet."""
+    try:
+        ss = get_spreadsheet()
+        ws = _ensure_sheet(ss, GSHEET_CALIBRATION_SHEET, CALIBRATION_HEADERS)
+        ws.append_row(_calibration_row(snapshot), value_input_option="RAW")
+        return True
+    except Exception as e:
+        print(f"[sheets_logger] Error logging calibration: {e}")
+        return False
+
+
+def log_calibration_csv(snapshot: dict) -> bool:
+    """Fallback: append one calibration snapshot row to local CSV."""
+    return _append_csv(_data_path('calibration.csv'), CALIBRATION_HEADERS, _calibration_row(snapshot))
+
+
+def read_calibration() -> pd.DataFrame:
+    """Read calibration snapshots from the sheet (or local CSV when Sheets is absent)."""
+    try:
+        ss = get_spreadsheet()
+        ws = _ensure_sheet(ss, GSHEET_CALIBRATION_SHEET, CALIBRATION_HEADERS)
+        data = ws.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=CALIBRATION_HEADERS)
+        return _coerce_calibration(pd.DataFrame(data))
+    except Exception as e:
+        print(f"[sheets_logger] Error reading calibration: {e}")
+        return read_calibration_csv()
+
+
+def read_calibration_csv() -> pd.DataFrame:
+    """Fallback: read calibration snapshots from local CSV."""
+    path = _data_path('calibration.csv')
+    if os.path.exists(path):
+        try:
+            return _coerce_calibration(pd.read_csv(path))
+        except Exception:
+            pass
+    return pd.DataFrame(columns=CALIBRATION_HEADERS)
+
+
+def _coerce_calibration(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize dtypes on a calibration frame."""
+    if df.empty:
+        return df
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    for col in ["n_days", "cov_1sigma", "cov_1_5sigma", "cov_2sigma",
+                "calibration_error", "mean_width_pct", "best_width",
+                "baseline_test_error", "proposed_test_error"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
