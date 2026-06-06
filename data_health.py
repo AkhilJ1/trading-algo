@@ -100,6 +100,88 @@ def reconcile_sources(ticker: str):
     return []
 
 
+def _probe_one_chain(sp, ticker, exp, chain_is_usable):
+    """Probe a single Schwab expiry directly (error UNcaught). Print counts +
+    OI/IV stats. Returns the usable bool (None if the call raised)."""
+    try:
+        calls, puts = sp.get_option_chain(ticker, exp)   # NOT swallowed here
+    except Exception as e:
+        print(f"  [{ticker}] schwab get_option_chain({exp}) RAISED: {e!r}")
+        return None
+
+    n_c = 0 if calls is None else len(calls)
+    n_p = 0 if puts is None else len(puts)
+    usable = chain_is_usable(calls, puts)
+    print(f"  [{ticker}] schwab chain {exp}: calls={n_c} puts={n_p} usable={usable}")
+    # Always show OI/IV coverage when there ARE rows — proves whether real OI/IV
+    # is present (chain genuinely works) or the quality gate rejected thin data.
+    for nm, df in (("calls", calls), ("puts", puts)):
+        if df is not None and not df.empty:
+            oi = df["openInterest"].fillna(0)
+            iv = df["impliedVolatility"].fillna(0)
+            print(f"      {nm}: OI>0 {int((oi > 0).sum())}/{len(df)} | "
+                  f"IV>0.05 {int((iv > 0.05).sum())}/{len(df)} | "
+                  f"cols={list(df.columns)}")
+    return usable
+
+
+def probe_schwab_chain(ticker: str):
+    """
+    Diagnostic: probe the Schwab OPTION CHAIN directly and report the real
+    reason it works or doesn't.
+
+    The normal pipeline (FallbackProvider) swallows the Schwab chain exception
+    and silently serves yfinance, which hides WHY options data isn't coming from
+    Schwab even when Schwab auth + price history work. This calls SchwabProvider
+    straight, with the error UNcaught, so the true cause shows up in the logs.
+
+    Probes TWO expiries: (1) exps[0] — exactly what fetch_options_chain picks via
+    `available[0]`; and (2) the nearest NON-expired expiry. If (1) is empty but
+    (2) is populated, the bug is stale-expiry SELECTION (Schwab lists the expired
+    date first and we don't filter it), not a broken chain fetch. Print-only —
+    it never changes the health pass/fail verdict.
+    """
+    from datetime import date, datetime
+    try:
+        from providers.schwab_provider import SchwabProvider
+        from providers.quality import chain_is_usable
+    except Exception as e:
+        print(f"  [{ticker}] schwab chain probe: import failed ({e!r})")
+        return
+
+    sp = SchwabProvider()
+    try:
+        exps = sp.get_expirations(ticker)          # swallows internally -> [] on failure
+    except Exception as e:
+        print(f"  [{ticker}] schwab get_expirations RAISED: {e!r}")
+        return
+    if not exps:
+        print(f"  [{ticker}] schwab chain probe: no expirations "
+              "(Schwab not configured / no market-data entitlement) — skipping")
+        return
+
+    print(f"  [{ticker}] schwab expirations[:8]={exps[:8]} (total {len(exps)})")
+
+    # (1) Exactly what the pipeline picks today: the first listed expiry.
+    _probe_one_chain(sp, ticker, exps[0], chain_is_usable)
+
+    # (2) Nearest NON-expired expiry — isolates a selection bug from a real
+    # chain-fetch failure. >= today keeps today's still-valid 0DTE in the morning.
+    def _d(s):
+        try:
+            return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
+    today = date.today()
+    future = [e for e in exps if (_d(e) is not None and _d(e) >= today)]
+    if future and future[0] != exps[0]:
+        print(f"  [{ticker}] nearest non-expired expiry={future[0]} "
+              f"(exps[0]={exps[0]} is in the PAST — pipeline would pick the stale one)")
+        _probe_one_chain(sp, ticker, future[0], chain_is_usable)
+    elif not future:
+        print(f"  [{ticker}] no non-expired expirations listed (all < {today})")
+
+
 def main(tickers):
     all_problems = []
     for t in tickers:
@@ -114,6 +196,9 @@ def main(tickers):
         for p in reconcile_sources(t):
             print(f"    ✗ {p}")
             all_problems.append(f"[{t}] {p}")
+
+        # Diagnostic only (never fails the gate): why is the chain on yfinance?
+        probe_schwab_chain(t)
 
     if all_problems:
         print(f"\n  DATA HEALTH: FAIL ({len(all_problems)} problem(s))")

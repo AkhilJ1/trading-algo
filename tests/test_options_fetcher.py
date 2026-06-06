@@ -11,7 +11,7 @@ import pandas as pd
 import options_fetcher
 from options_fetcher import (
     _resolve_ticker, _cache_path, _as_of_from_meta_or_filename, _chain_source,
-    fetch_options_chain,
+    _drop_expired, fetch_options_chain,
 )
 from tests.conftest import FakeProvider, make_chain
 
@@ -121,3 +121,33 @@ def test_no_expirations_no_cache_returns_empty(tmp_cache, monkeypatch):
     _use_provider(monkeypatch, prov)
     calls, puts, meta = fetch_options_chain("SPY", use_cache=False)
     assert calls.empty and puts.empty and meta == {}
+
+
+# ── expired-expiry filter (the Schwab silent-fallback bug) ───────────────────
+def test_drop_expired_filters_past_keeps_today_and_future():
+    """Schwab lists the just-expired date first; only >= today should survive,
+    and today's still-live 0DTE must be kept for the pre-open recorder."""
+    from datetime import date, timedelta
+    today = date.today()
+    past = (today - timedelta(days=3)).isoformat()
+    tdy = today.isoformat()
+    fut = (today + timedelta(days=5)).isoformat()
+    assert _drop_expired([past, tdy, fut]) == [tdy, fut]   # today's 0DTE survives
+    assert _drop_expired(["weird", fut]) == ["weird", fut]  # unparseable kept
+    assert _drop_expired([past]) == [past]                  # all-past: defensive no-op
+    assert _drop_expired([]) == []
+
+
+def test_fetch_skips_expired_first_expiry(tmp_cache, monkeypatch):
+    """Reproduces the silent-fallback bug: Schwab returns the expired date FIRST.
+    fetch_options_chain must select the nearest LIVE expiry, not available[0]."""
+    from datetime import date, timedelta
+    past = (date.today() - timedelta(days=2)).isoformat()    # already expired
+    future = (date.today() + timedelta(days=5)).isoformat()  # live
+    prov = FakeProvider(name="schwab", expirations=[past, future],
+                        chain=(make_chain(12), make_chain(12)))
+    _use_provider(monkeypatch, prov)
+    calls, puts, meta = fetch_options_chain("SPY", use_cache=False)  # no explicit expiry
+    assert meta["expiry"] == future       # picked the live expiry, not the expired one
+    assert meta["source"] == "schwab"     # so Schwab serves the chain (no fallback)
+    assert len(calls) == 12

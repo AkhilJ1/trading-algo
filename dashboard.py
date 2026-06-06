@@ -118,6 +118,24 @@ st.sidebar.markdown("---")
 st.sidebar.caption(f"Watchlist: {len(WATCHLIST)} tickers")
 st.sidebar.caption(f"Strategy: RSI<{RSI_OVERSOLD} + BB wick | MA({MA_SHORT}/{MA_LONG})")
 
+# Active data backend — so you can SEE at a glance whether Schwab is wired up.
+# The credentials bridge above flips DATA_PROVIDER to "schwab" only when all
+# three Schwab secrets parse and the token file is written; the Schwab
+# FallbackProvider then names itself "schwab->yfinance". If the secrets are
+# missing or misnamed this stays "yfinance" and you know the entry didn't take.
+# NOTE: this shows what's CONFIGURED. Whether a given chain actually came from
+# Schwab is shown per-analysis in the Fractal & Options tab ("Chain via: …"),
+# because Schwab can authenticate yet still fall back to yfinance on a bad call.
+try:
+    from providers import get_provider as _get_provider
+    _backend = _get_provider().name
+except Exception:
+    _backend = os.environ.get("DATA_PROVIDER", "yfinance")
+if "schwab" in _backend:
+    st.sidebar.caption("🟢 Data backend: **Schwab** primary · yfinance fallback")
+else:
+    st.sidebar.caption("⚪ Data backend: **yfinance** only — Schwab not detected")
+
 
 # ---------------------------------------------------------------------------
 # Cached data loaders
@@ -1710,7 +1728,13 @@ elif page == '🔬 Fractal & Options':
     st.markdown(f"### {result['ticker']}{proxy_note}  —  ${_live_price:.2f}")
     _src_label = ("live quote (pre/post-market aware)" if _spot_source == 'live_override'
                   else "last daily close — no live quote available")
+    # Surface the ACTUAL option-chain backend for this run. result['source'] is
+    # FallbackProvider.last_source['chain'] — 'schwab' or 'yfinance'. If the
+    # sidebar says Schwab is configured but this reads 'yfinance', the Schwab
+    # chain call fell back (the thing to investigate), so never hide it.
+    _chain_src = str(result.get('source', '?'))
     _analysis_note = (f"Expiry: {result['expiry']}  |  Analyzed: {result['timestamp']}"
+                      f"  |  Chain via: {_chain_src}"
                       f"  |  Anchored on {_src_label}")
     _price_delta = _live_price - _analyzed_spot
     if abs(_price_delta) > 0.005:
