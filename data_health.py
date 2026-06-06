@@ -100,6 +100,58 @@ def reconcile_sources(ticker: str):
     return []
 
 
+def probe_schwab_chain(ticker: str):
+    """
+    Diagnostic: probe the Schwab OPTION CHAIN directly and report the real
+    reason it works or doesn't.
+
+    The normal pipeline (FallbackProvider) swallows the Schwab chain exception
+    and silently serves yfinance, which hides WHY options data isn't coming from
+    Schwab even when Schwab auth + price history work. This calls SchwabProvider
+    straight, with the error UNcaught, so the true cause shows up in the logs.
+    Print-only — it never changes the health pass/fail verdict.
+    """
+    try:
+        from providers.schwab_provider import SchwabProvider
+        from providers.quality import chain_is_usable
+    except Exception as e:
+        print(f"  [{ticker}] schwab chain probe: import failed ({e!r})")
+        return
+
+    sp = SchwabProvider()
+    try:
+        exps = sp.get_expirations(ticker)          # swallows internally -> [] on failure
+    except Exception as e:
+        print(f"  [{ticker}] schwab get_expirations RAISED: {e!r}")
+        return
+    if not exps:
+        print(f"  [{ticker}] schwab chain probe: no expirations "
+              "(Schwab not configured / no market-data entitlement) — skipping")
+        return
+
+    exp = exps[0]
+    try:
+        calls, puts = sp.get_option_chain(ticker, exp)   # NOT swallowed here
+    except Exception as e:
+        print(f"  [{ticker}] schwab get_option_chain({exp}) RAISED: {e!r}")
+        return
+
+    n_c = 0 if calls is None else len(calls)
+    n_p = 0 if puts is None else len(puts)
+    usable = chain_is_usable(calls, puts)
+    print(f"  [{ticker}] schwab chain {exp}: calls={n_c} puts={n_p} usable={usable}")
+    if n_c + n_p > 0 and not usable:
+        # Show why the quality gate rejected it (this is the most likely cause of
+        # the silent fallback): how many strikes carry real OI / IV.
+        for nm, df in (("calls", calls), ("puts", puts)):
+            if df is not None and not df.empty:
+                oi = df["openInterest"].fillna(0)
+                iv = df["impliedVolatility"].fillna(0)
+                print(f"      {nm}: OI>0 {int((oi > 0).sum())}/{len(df)} | "
+                      f"IV>0.05 {int((iv > 0.05).sum())}/{len(df)} | "
+                      f"cols={list(df.columns)}")
+
+
 def main(tickers):
     all_problems = []
     for t in tickers:
@@ -114,6 +166,9 @@ def main(tickers):
         for p in reconcile_sources(t):
             print(f"    ✗ {p}")
             all_problems.append(f"[{t}] {p}")
+
+        # Diagnostic only (never fails the gate): why is the chain on yfinance?
+        probe_schwab_chain(t)
 
     if all_problems:
         print(f"\n  DATA HEALTH: FAIL ({len(all_problems)} problem(s))")

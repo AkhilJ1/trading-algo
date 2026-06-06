@@ -51,8 +51,13 @@ jobs:
 
       - name: Run data-health check
         env:
-          # These are only used when DATA_PROVIDER=schwab / reconciliation runs.
-          # Absent secrets simply leave Schwab unconfigured (not a failure).
+          # Run the pipeline check through the SAME Schwab-primary path the
+          # recorders use, so the printed `source=` line is the authoritative
+          # daily answer to "did the option chain actually come from Schwab?"
+          # (Schwab raising or failing the quality gate still degrades safely to
+          # yfinance — the check passes either way; the source tag tells the
+          # truth.) Absent secrets leave Schwab unconfigured (not a failure).
+          DATA_PROVIDER: schwab
           SCHWAB_API_KEY: ${{ secrets.SCHWAB_API_KEY }}
           SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
           SCHWAB_TOKEN_PATH: schwab_token.json
