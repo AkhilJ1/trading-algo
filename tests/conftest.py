@@ -10,6 +10,8 @@ tests are fast and reproducible in CI.
 import pandas as pd
 import pytest
 
+from providers.base import DataProvider
+
 
 # 7-column option-chain contract every provider must satisfy.
 CHAIN_COLUMNS = [
@@ -54,11 +56,13 @@ def make_price_df(closes=(100.0, 101.0, 102.5)):
     )
 
 
-class FakeProvider:
+class FakeProvider(DataProvider):
     """A configurable DataProvider stand-in for fetcher/health tests.
 
     You hand it the expirations, the (calls, puts) chain, and the price history
-    it should return; it records calls so tests can assert routing.
+    it should return; it records calls so tests can assert routing. Subclassing
+    DataProvider means it inherits the real get_price_history_batch default
+    (per-symbol loop), so batch routing can be exercised offline.
     """
 
     def __init__(self, name="fake", expirations=None, chain=None, price=None,

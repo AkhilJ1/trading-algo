@@ -70,6 +70,36 @@ class DataProvider(ABC):
         """
         raise NotImplementedError
 
+    def get_price_history_batch(
+        self,
+        tickers: List[str],
+        period: str,
+        interval: str,
+    ) -> dict:
+        """
+        Return {ticker: OHLCV DataFrame} for many tickers in one call.
+
+        The default implementation simply loops `get_price_history` per ticker —
+        which is the *only* option for a backend whose API is per-symbol (e.g.
+        Schwab). Backends that expose a true multi-symbol endpoint (yfinance's
+        batch download) override this for efficiency.
+
+        A ticker whose fetch raises or comes back empty is omitted from the
+        result rather than aborting the whole batch, so one bad symbol never
+        sinks a universe-wide screen. When this provider is the FallbackProvider,
+        each per-ticker call already degrades Schwab -> yfinance, so the batch is
+        "Schwab when available, yfinance otherwise" symbol by symbol.
+        """
+        out: dict = {}
+        for t in tickers:
+            try:
+                df = self.get_price_history(t, period=period, interval=interval)
+                if df is not None and not df.empty:
+                    out[t] = df
+            except Exception:
+                continue
+        return out
+
     @abstractmethod
     def get_expirations(self, ticker: str) -> List[str]:
         """Return available option expiration dates as 'YYYY-MM-DD' strings."""

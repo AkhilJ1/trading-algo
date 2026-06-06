@@ -46,6 +46,37 @@ class YFinanceProvider(DataProvider):
         # Mirrors: yf.Ticker(ticker).history(period=period, interval=interval)
         return yf.Ticker(ticker).history(period=period, interval=interval)
 
+    def get_price_history_batch(
+        self,
+        tickers: List[str],
+        period: str,
+        interval: str,
+    ) -> dict:
+        """Multi-symbol download in one round trip (mirrors the old screener call).
+
+        Returns {ticker: per-symbol OHLCV frame}; symbols with no data are
+        omitted. Column normalization / tz handling stays with the caller, same
+        as the per-symbol path, so the two are interchangeable.
+        """
+        syms = [str(t) for t in tickers]
+        if not syms:
+            return {}
+        raw = yf.download(
+            syms, period=period, interval=interval,
+            group_by="ticker", auto_adjust=True, progress=False, threads=True,
+        )
+        out: dict = {}
+        n = len(syms)
+        for t in syms:
+            try:
+                df = raw.copy() if n == 1 else raw[t].copy()
+                df = df.dropna(how="all")
+                if not df.empty:
+                    out[t] = df
+            except Exception:
+                continue
+        return out
+
     def get_expirations(self, ticker: str) -> List[str]:
         # Mirrors: list(yf.Ticker(resolved).options)
         try:
