@@ -94,6 +94,11 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
         estimated_close=est_close,
         pin_target=pin_target,
         max_pain=max_pain,
+        # Provenance for data-accuracy auditing: which spot the estimate was
+        # anchored on ('daily_close' after the close) and which backend served
+        # the option chain it was built from ('schwab' / 'yfinance').
+        spot_source=result.get("spot_source", "daily_close"),
+        chain_source=result.get("source", ""),
     )
 
     logged = False

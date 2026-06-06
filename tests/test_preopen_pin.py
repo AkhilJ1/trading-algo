@@ -109,6 +109,8 @@ def _result(**over):
         "expiry": "2026-06-04",
         "max_pain": 600.0,
         "market_regime": "transitional",
+        "spot_source": "live_override",
+        "source": "schwab",
         "estimated_close": {
             "estimated_close": 600.85,
             "pin_target": 600.40,
@@ -131,6 +133,9 @@ def test_kwargs_carry_pin_scalars_and_anchor_spot():
     assert kw["expiry"] == "2026-06-04"         # today's 0DTE
     assert kw["vix"] == 14.2
     assert kw["gex_net"] == 1.0e9
+    # Provenance carries through for data-accuracy auditing.
+    assert kw["spot_source"] == "live_override"  # anchored on the live pre-market quote
+    assert kw["chain_source"] == "schwab"        # chain served by Schwab
 
 
 def test_kwargs_prefer_gamma_regime_over_vix_regime():
@@ -153,3 +158,14 @@ def test_kwargs_handle_non_dict_pin_gracefully():
     assert kw["estimated_close"] is None
     assert kw["pin_target"] is None
     assert kw["max_pain"] == 600.0
+
+
+def test_kwargs_default_provenance_when_absent():
+    # Older result dicts without provenance default safely: spot is treated as a
+    # settled daily close and the chain backend is left blank rather than guessed.
+    r = _result()
+    r.pop("spot_source")
+    r.pop("source")
+    kw = build_pin_forecast_kwargs(r, ticker="SPY")
+    assert kw["spot_source"] == "daily_close"
+    assert kw["chain_source"] == ""
