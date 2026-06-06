@@ -24,6 +24,60 @@ from plotly.subplots import make_subplots
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+
+# ---------------------------------------------------------------------------
+# Schwab credentials bridge — MUST run before any project module imports config
+# ---------------------------------------------------------------------------
+# On Streamlit Cloud the Schwab credentials live in st.secrets, but the data
+# layer (providers/) reads them from os.environ, and config.DATA_PROVIDER is
+# captured at import time. So we copy the secrets into the environment here,
+# before `from config import ...` below. When all three Schwab secrets are
+# present we materialize the OAuth token file and flip DATA_PROVIDER to
+# "schwab", so the WHOLE dashboard runs Schwab-primary with yfinance as the
+# automatic per-call fallback. When they're absent (local dev, no Schwab) this
+# is a no-op and the app stays yfinance-only — "only Schwab when available".
+def _bridge_schwab_secrets() -> None:
+    try:
+        secrets = st.secrets
+    except Exception:
+        return  # no secrets.toml configured at all → yfinance-only
+
+    def _get(key):
+        try:
+            return secrets[key] if key in secrets else None
+        except Exception:
+            return None
+
+    api_key = _get("SCHWAB_API_KEY")
+    app_secret = _get("SCHWAB_APP_SECRET")
+    token_blob = _get("SCHWAB_TOKEN")
+    # Without the full credential set Schwab cannot authenticate — stay on
+    # yfinance rather than half-configuring and crashing every fetch.
+    if not (api_key and app_secret and token_blob):
+        return
+
+    os.environ.setdefault("SCHWAB_API_KEY", str(api_key))
+    os.environ.setdefault("SCHWAB_APP_SECRET", str(app_secret))
+
+    token_path = os.environ.get("SCHWAB_TOKEN_PATH") or str(
+        _get("SCHWAB_TOKEN_PATH") or "schwab_token.json"
+    )
+    try:
+        # Write the token once per container; don't clobber a token that
+        # schwab-py may have refreshed in place during this container's life.
+        if not os.path.exists(token_path):
+            with open(token_path, "w") as fh:
+                fh.write(token_blob if isinstance(token_blob, str) else str(token_blob))
+    except Exception:
+        return  # couldn't persist the token → don't flip to a broken Schwab
+
+    os.environ["SCHWAB_TOKEN_PATH"] = token_path
+    # All set: prefer Schwab. setdefault so an explicit env override still wins.
+    os.environ.setdefault("DATA_PROVIDER", "schwab")
+
+
+_bridge_schwab_secrets()
+
 from config import WATCHLIST, MA_SHORT, MA_LONG, RSI_OVERSOLD, BB_WICK_LOOKBACK, SIGNAL_WEIGHTS
 from screener import discover_candidates
 from data_fetcher import fetch_stock_data

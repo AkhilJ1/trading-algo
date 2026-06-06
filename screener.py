@@ -15,9 +15,9 @@ Usage:
 """
 
 import pandas as pd
-import yfinance as yf
 
 from config import WATCHLIST
+from providers import get_provider
 from strategies.rsi_bollinger import add_indicators, get_buy_signal
 from backtest import backtest_ma_crossover
 
@@ -48,18 +48,20 @@ def get_sp500_tickers() -> list:
         return list(WATCHLIST)
 
 
-def _normalise_df(raw, ticker: str, n_tickers: int) -> pd.DataFrame:
+def _normalise_df(df) -> pd.DataFrame:
     """
-    Extract and normalise a per-ticker DataFrame from a yf.download batch result.
+    Normalise a single per-ticker OHLCV frame returned by the data provider:
+    title-case the columns and drop any timezone so downstream indicators see
+    the same shape regardless of which backend (Schwab or yfinance) served it.
     Returns an empty DataFrame on any failure.
     """
     try:
-        df = raw.copy() if n_tickers == 1 else raw[ticker].copy()
-        df = df.dropna(how='all')
-        df.columns = [str(c).strip().title() for c in df.columns]
-        if df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-        return df
+        out = df.copy()
+        out = out.dropna(how='all')
+        out.columns = [str(c).strip().title() for c in out.columns]
+        if isinstance(out.index, pd.DatetimeIndex) and out.index.tz is not None:
+            out.index = out.index.tz_localize(None)
+        return out
     except Exception:
         return pd.DataFrame()
 
@@ -87,15 +89,12 @@ def discover_candidates(
     universe = get_sp500_tickers()
 
     _cb(0.03, f'Batch-downloading weekly charts for {len(universe)} stocks…')
+    # Route through the active provider: when DATA_PROVIDER=schwab this pulls
+    # each symbol from Schwab (degrading to yfinance per symbol on any miss);
+    # the yfinance backend keeps its fast one-shot multi-symbol download.
     try:
-        raw = yf.download(
-            universe,
-            period='1y',
-            interval='1wk',
-            group_by='ticker',
-            auto_adjust=True,
-            progress=False,
-            threads=True,
+        raw = get_provider().get_price_history_batch(
+            universe, period='1y', interval='1wk',
         )
     except Exception:
         return []
@@ -104,7 +103,10 @@ def discover_candidates(
     _cb(0.35, f'Applying weekly RSI < {rsi_prefilter:.0f} pre-filter…')
     survivors = []
     for ticker in universe:
-        df = _normalise_df(raw, ticker, len(universe))
+        raw_df = raw.get(ticker)
+        if raw_df is None:
+            continue
+        df = _normalise_df(raw_df)
         if df.empty or len(df) < 20 or 'Close' not in df.columns:
             continue
         try:
