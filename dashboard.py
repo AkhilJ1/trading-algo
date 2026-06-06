@@ -202,6 +202,31 @@ with st.sidebar.expander("🔧 Schwab connection check"):
                 _exps = []
                 _lines.append(f"get_expirations: RAISED → {type(_e).__name__}: {_e}")
 
+            # Raw HTTP probe: schwab-py does NOT raise on 4xx/5xx, so an empty
+            # expirationList hides the real status (a 401/403 entitlement reject
+            # looks identical to a genuinely empty list). Surface status + body.
+            # The quote call is the discriminator: a 401/403 there means the app
+            # lacks Market Data Production entitlement (token still loads fine).
+            try:
+                _cl = _sp._get_client()
+                try:
+                    _r = _cl.get_option_expiration_chain("SPY")
+                    _lines.append(
+                        f"raw expiration-chain: HTTP {_r.status_code} "
+                        f"body[:300]={_r.text[:300]!r}")
+                except Exception as _e:
+                    _lines.append(
+                        f"raw expiration-chain RAISED → {type(_e).__name__}: {_e}")
+                try:
+                    _rq = _cl.get_quote("SPY")
+                    _lines.append(
+                        f"raw quote('SPY'): HTTP {_rq.status_code} "
+                        f"body[:200]={_rq.text[:200]!r}")
+                except Exception as _e:
+                    _lines.append(f"raw quote RAISED → {type(_e).__name__}: {_e}")
+            except Exception as _e:
+                _lines.append(f"raw probe setup failed: {type(_e).__name__}: {_e}")
+
             def _pd(s):
                 try:
                     return _dt.strptime(str(s)[:10], "%Y-%m-%d").date()
