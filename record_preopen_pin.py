@@ -115,6 +115,12 @@ def build_pin_forecast_kwargs(result: dict, *, ticker: str,
         estimated_close=est_close,
         pin_target=pin_target,
         max_pain=max_pain,
+        # Provenance for data-accuracy auditing: was the pin anchored on a LIVE
+        # pre-market quote ('live_override') or a stale settled close
+        # ('daily_close'), and which backend served the option chain it was
+        # built from ('schwab' / 'yfinance').
+        spot_source=result.get("spot_source", "daily_close"),
+        chain_source=result.get("source", ""),
     )
 
 

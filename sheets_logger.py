@@ -35,6 +35,16 @@ PREDICTION_HEADERS = [
     "date", "timestamp", "ticker", "spot_price", "floor", "ceiling",
     "bias", "confidence", "expiry", "vix", "gex_net", "regime",
     "estimated_close", "pin_target", "max_pain",
+    # Provenance (appended so existing rows stay aligned; _ensure_sheet updates
+    # the header on the next write):
+    #   spot_source  — 'live_override' (live pre/post-market anchor) or
+    #                  'daily_close' (settled close). This is the durable proof
+    #                  that a morning pin was anchored on a LIVE price, not a
+    #                  stale close.
+    #   chain_source — which backend actually served the option chain this row
+    #                  was built from ('schwab' or 'yfinance'), so the ledger
+    #                  itself shows whether Schwab or the fallback was used.
+    "spot_source", "chain_source",
 ]
 WEIGHT_HEADERS = [
     "date", "weight_name", "old_value", "new_value", "reason",
@@ -151,6 +161,7 @@ def _prediction_row(
     bias, confidence, expiry,
     vix=None, gex_net=None, regime=None,
     estimated_close=None, pin_target=None, max_pain=None,
+    spot_source="", chain_source="",
 ):
     """Build a Predictions row in PREDICTION_HEADERS order (shared by sheet/CSV)."""
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -161,6 +172,7 @@ def _prediction_row(
         _num_or_blank(vix), _num_or_blank(gex_net), regime or "",
         _num_or_blank(estimated_close), _num_or_blank(pin_target),
         _num_or_blank(max_pain),
+        spot_source or "", chain_source or "",
     ]
 
 
@@ -169,6 +181,7 @@ def log_prediction(
     bias, confidence, expiry,
     vix=None, gex_net=None, regime=None,
     estimated_close=None, pin_target=None, max_pain=None,
+    spot_source="", chain_source="",
     sheet=GSHEET_PREDICTIONS_SHEET,
 ) -> bool:
     """Append one prediction row. Returns True on success.
@@ -184,6 +197,7 @@ def log_prediction(
             date_str, ticker, spot_price, floor, ceiling,
             bias, confidence, expiry, vix, gex_net, regime,
             estimated_close, pin_target, max_pain,
+            spot_source, chain_source,
         )
         ws.append_row(row, value_input_option="RAW")
         return True
@@ -301,6 +315,7 @@ def log_prediction_csv(
     bias, confidence, expiry,
     vix=None, gex_net=None, regime=None,
     estimated_close=None, pin_target=None, max_pain=None,
+    spot_source="", chain_source="",
     path_name='predictions.csv',
 ) -> bool:
     """Fallback: log prediction to a local CSV (`path_name` under data/)."""
@@ -308,6 +323,7 @@ def log_prediction_csv(
         date_str, ticker, spot_price, floor, ceiling,
         bias, confidence, expiry, vix, gex_net, regime,
         estimated_close, pin_target, max_pain,
+        spot_source, chain_source,
     )
     return _append_csv(_data_path(path_name), PREDICTION_HEADERS, row)
 

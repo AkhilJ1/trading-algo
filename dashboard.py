@@ -1549,7 +1549,7 @@ elif page == '🔬 Fractal & Options':
     st.title('🔬 Fractal & Options Analysis')
     st.caption('Institutional-grade support/resistance + directional bias from options flow & fractal structure')
 
-    from options_fetcher import fetch_expiration_dates
+    from options_fetcher import fetch_expiration_dates, fetch_live_spot
     from strategies.fractal_options import compute_composite_analysis
 
     # ── Session state ──────────────────────────────────────────────────────
@@ -1600,8 +1600,17 @@ elif page == '🔬 Fractal & Options':
     if (analyze_btn or expiry_changed) and fo_ticker.strip():
         exp_arg = None if fo_expiry == 'Nearest' else fo_expiry
         with st.spinner(f'Analyzing {fo_ticker.upper()} ({fo_expiry})... (options + fractals + GEX)'):
+            # Anchor on the freshest available price (pre/post-market aware via
+            # the active provider — Schwab, else yfinance prepost). Before the
+            # 9:30 ET open the daily bar for today doesn't exist yet, so without
+            # this the analysis would silently center on yesterday's settled
+            # close and a wild pre-market move would be invisible. fetch_live_spot
+            # returns None when no live quote exists, in which case the data
+            # layer keeps the daily close and tags spot_source='daily_close'.
+            _live_spot = fetch_live_spot(fo_ticker.strip().upper())
             result = compute_composite_analysis(
                 fo_ticker.strip().upper(), exp_arg, weights=active_weights,
+                spot_override=_live_spot,
             )
         st.session_state.fo_result = result
 
@@ -1628,22 +1637,42 @@ elif page == '🔬 Fractal & Options':
     # ══════════════════════════════════════════════════════════════════════
     proxy_note = f"  (via {result['resolved_ticker']} options)" if result['proxy_used'] else ""
 
-    # Fetch live/latest price on every refresh (falls back to last analysis price)
-    _live_price = result['spot_price']
+    # Headline price. The analysis is now re-centered on the live (pre/post-market
+    # capable) spot via spot_override, so result['spot_price'] already reflects the
+    # live anchor when one was available. We re-fetch a fresh live quote here too
+    # so the header keeps updating on reruns, and — crucially — we surface WHICH
+    # spot the analysis used so a pre-market move is never hidden behind
+    # yesterday's settled close.
+    _analyzed_spot = result['spot_price']
+    _spot_source = result.get('spot_source', 'daily_close')
+    _live_price = _analyzed_spot
     try:
-        import yfinance as yf
-        _hist = yf.Ticker(result['ticker']).history(period='2d')
-        if not _hist.empty:
-            _live_price = float(_hist['Close'].iloc[-1])
+        _q = fetch_live_spot(result['ticker'])
+        if _q:
+            _live_price = float(_q)
     except Exception:
         pass
 
     st.markdown(f"### {result['ticker']}{proxy_note}  —  ${_live_price:.2f}")
-    _price_delta = _live_price - result['spot_price']
-    _analysis_note = f"Expiry: {result['expiry']}  |  Analyzed: {result['timestamp']}"
+    _src_label = ("live quote (pre/post-market aware)" if _spot_source == 'live_override'
+                  else "last daily close — no live quote available")
+    _analysis_note = (f"Expiry: {result['expiry']}  |  Analyzed: {result['timestamp']}"
+                      f"  |  Anchored on {_src_label}")
+    _price_delta = _live_price - _analyzed_spot
     if abs(_price_delta) > 0.005:
         _analysis_note += f"  |  Since analysis: {'+' if _price_delta > 0 else ''}{_price_delta:.2f}"
     st.caption(_analysis_note)
+
+    # If the analysis fell back to yesterday's close (no live quote available),
+    # say so loudly so a wild pre-market / overnight move is never silently
+    # ignored. During market or extended hours fetch_live_spot returns a price,
+    # the analysis is anchored on it, and this banner does not show.
+    if _spot_source != 'live_override':
+        st.warning(
+            "Heads up: this analysis is anchored on the **last daily close**, not a "
+            "live quote — no pre/post-market price was available when you ran it. "
+            "Re-run during market or extended hours to capture a live move."
+        )
 
     bias = result['bias']
     conf = result['confidence']
