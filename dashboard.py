@@ -14,6 +14,7 @@ Compatible with streamlit 1.12.0 (Python 3.9.7 environment).
 
 import sys
 import os
+import json
 from datetime import date, timedelta
 
 import streamlit as st
@@ -63,11 +64,24 @@ def _bridge_schwab_secrets() -> None:
         _get("SCHWAB_TOKEN_PATH") or "schwab_token.json"
     )
     try:
-        # Write the token once per container; don't clobber a token that
-        # schwab-py may have refreshed in place during this container's life.
-        if not os.path.exists(token_path):
-            with open(token_path, "w") as fh:
-                fh.write(token_blob if isinstance(token_blob, str) else str(token_blob))
+        # Serialize the secret to the exact JSON schwab-py expects. If
+        # SCHWAB_TOKEN was pasted into secrets.toml as a bare JSON object (no
+        # surrounding quotes), Streamlit parses it into a dict-like — and str()
+        # on that emits a PYTHON repr (single quotes, True/None) that schwab-py
+        # cannot load, so every Schwab call silently fell back to yfinance.
+        # json.dumps() restores valid JSON; a string secret is written verbatim.
+        if isinstance(token_blob, str):
+            token_str = token_blob
+        else:
+            token_str = json.dumps(token_blob, default=lambda o: dict(o))
+        # Always (re)write from the secret on cold start so re-running
+        # schwab_auth.py and pasting a fresh SCHWAB_TOKEN actually takes effect.
+        # This bridge runs only at process import (cold start), never on a warm
+        # rerun, so it cannot clobber the access token schwab-py refreshes in
+        # place during the container's life; the 7-day refresh token does not
+        # rotate, so writing the secret's copy never loses a newer one.
+        with open(token_path, "w") as fh:
+            fh.write(token_str)
     except Exception:
         return  # couldn't persist the token → don't flip to a broken Schwab
 
@@ -135,6 +149,86 @@ if "schwab" in _backend:
     st.sidebar.caption("🟢 Data backend: **Schwab** primary · yfinance fallback")
 else:
     st.sidebar.caption("⚪ Data backend: **yfinance** only — Schwab not detected")
+
+
+# ── Schwab connection check (on-demand) ─────────────────────────────────────
+# The banner above only reflects what's CONFIGURED. When it says Schwab yet
+# chains still arrive via yfinance, the cause is a token the Schwab client can't
+# read/validate — and the FallbackProvider swallows that exception. This expander
+# calls Schwab DIRECTLY with the error uncaught so the true reason is visible.
+# It never prints secret VALUES — only whether each secret is present.
+with st.sidebar.expander("🔧 Schwab connection check"):
+    st.caption("Diagnose why chains may be on yfinance. Never shows secret values.")
+    if st.button("Run check", key="schwab_diag_btn"):
+        from datetime import datetime as _dt, timezone as _tz, date as _date
+        _lines = []
+        for _k in ("SCHWAB_API_KEY", "SCHWAB_APP_SECRET", "SCHWAB_TOKEN_PATH",
+                   "DATA_PROVIDER"):
+            _lines.append(f"{_k}: {'set' if os.environ.get(_k) else 'missing'}")
+
+        _tp = os.environ.get("SCHWAB_TOKEN_PATH", "schwab_token.json")
+        if not os.path.exists(_tp):
+            _lines.append(f"token file: MISSING at {_tp!r}")
+        else:
+            try:
+                with open(_tp) as _fh:
+                    _tok = json.load(_fh)
+                _ct = _tok.get("creation_timestamp") or os.path.getmtime(_tp)
+                _age = (_dt.now(_tz.utc).timestamp() - float(_ct)) / 86400.0
+                _left = 7.0 - _age
+                _lines.append(
+                    f"token JSON parses: yes (keys={sorted(_tok.keys())})")
+                _lines.append(
+                    f"token age: {_age:.2f}d — "
+                    f"{'EXPIRED, re-auth now' if _left < 0 else f'{_left:.1f}d left of 7d'}")
+            except Exception as _e:
+                _lines.append(
+                    f"token file: UNREADABLE/not-JSON → {type(_e).__name__}: {_e}")
+
+        try:
+            from providers.schwab_provider import SchwabProvider
+            from providers.quality import chain_is_usable as _ciu
+            _sp = SchwabProvider()
+            try:
+                _sp._get_client()
+                _lines.append("client build: OK")
+            except Exception as _e:
+                _lines.append(f"client build: FAILED → {type(_e).__name__}: {_e}")
+            try:
+                _exps = _sp.get_expirations("SPY")
+                _lines.append(
+                    f"get_expirations('SPY'): {len(_exps)} dates, first={_exps[:3]}")
+            except Exception as _e:
+                _exps = []
+                _lines.append(f"get_expirations: RAISED → {type(_e).__name__}: {_e}")
+
+            def _pd(s):
+                try:
+                    return _dt.strptime(str(s)[:10], "%Y-%m-%d").date()
+                except Exception:
+                    return None
+            _future = [e for e in _exps if (_pd(e) and _pd(e) >= _date.today())]
+            if _future:
+                _exp = _future[0]
+                try:
+                    _c, _p = _sp.get_option_chain("SPY", _exp)
+                    _nc = 0 if _c is None else len(_c)
+                    _np = 0 if _p is None else len(_p)
+                    _lines.append(
+                        f"get_option_chain('SPY',{_exp}): calls={_nc} puts={_np} "
+                        f"usable={_ciu(_c, _p)}")
+                except Exception as _e:
+                    _lines.append(
+                        f"get_option_chain('SPY',{_exp}): RAISED → "
+                        f"{type(_e).__name__}: {_e}")
+            elif _exps:
+                _lines.append("no non-expired expiry available to probe a chain")
+        except Exception as _e:
+            _lines.append(f"schwab probe import failed: {type(_e).__name__}: {_e}")
+
+        st.code("\n".join(_lines) or "(no output)")
+        st.caption("Healthy = 'client build: OK' AND get_option_chain "
+                   "'usable=True'. Any RAISED/FAILED line is the real cause.")
 
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ import os
 import re
 import json
 import glob
-from datetime import date, datetime
+from datetime import date, datetime, time as dtime, timezone
 from typing import Optional, Tuple, List
 
 import pandas as pd
@@ -31,6 +31,45 @@ import pandas as pd
 from config import CACHE_DIR, FUTURES_PROXY, DATA_PROVIDER
 from providers import get_provider
 from providers.quality import chain_is_usable
+
+# ── Intraday cache bucketing ───────────────────────────────────────────────
+# WHY: the options cache used to be keyed by calendar DATE only, so the first
+# Analyze of the day wrote opts_<tkr>_<exp>_<date>.json and every later Analyze
+# re-read that same file — floor / ceiling / max-pain / dealer-pin were frozen
+# at the day's first snapshot no matter how many times you re-ran. During market
+# hours we now add an HHMM bucket to the cache key so the chain is re-fetched
+# live every few minutes (levels actually move through the day, like the Fractal
+# Exchange / Milk RCG graphs). Outside market hours we keep the date-only key so
+# the after-close protection (serve last-known-good, never overwrite with a
+# thin/closed-market chain) is completely unchanged.
+try:
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - zoneinfo ships with the py3.9+ runtime
+    _ET = None
+
+_INTRADAY_BUCKET_MINUTES = 5
+_MARKET_OPEN = dtime(9, 30)
+_MARKET_CLOSE = dtime(16, 0)
+
+
+def _now_et() -> datetime:
+    return datetime.now(_ET) if _ET is not None else datetime.now()
+
+
+def _is_market_hours(now_et: Optional[datetime] = None) -> bool:
+    """True on a weekday between 9:30 and 16:00 ET (regular session)."""
+    now = now_et or _now_et()
+    if now.weekday() >= 5:   # Sat / Sun
+        return False
+    return _MARKET_OPEN <= now.time() <= _MARKET_CLOSE
+
+
+def _intraday_bucket(now_et: Optional[datetime] = None) -> str:
+    """HHMM rounded down to the bucket size, e.g. 14:32 -> '1430'."""
+    now = now_et or _now_et()
+    minute = (now.minute // _INTRADAY_BUCKET_MINUTES) * _INTRADAY_BUCKET_MINUTES
+    return f"{now.hour:02d}{minute:02d}"
 
 
 def _resolve_ticker(ticker: str) -> Tuple[str, bool]:
@@ -45,10 +84,22 @@ def _resolve_ticker(ticker: str) -> Tuple[str, bool]:
 def _cache_path(ticker: str, expiry: str) -> str:
     today = date.today().isoformat()
     safe = ticker.replace('=', '_').replace('/', '_')
+    now_et = _now_et()
+    if _is_market_hours(now_et):
+        # Bucketed key rotates every _INTRADAY_BUCKET_MINUTES, so each Analyze in
+        # a new bucket triggers a fresh live fetch instead of replaying the day's
+        # first snapshot. Within a bucket, repeated Analyze reuses the file (no
+        # hammering the Schwab API).
+        return os.path.join(
+            CACHE_DIR,
+            f"opts_{safe}_{expiry}_{today}_{_intraday_bucket(now_et)}.json",
+        )
     return os.path.join(CACHE_DIR, f"opts_{safe}_{expiry}_{today}.json")
 
 
-_DATE_FROM_FILENAME = re.compile(r'_(\d{4}-\d{2}-\d{2})\.json$')
+# Matches the date in both the date-only key and the intraday-bucketed key
+# (..._YYYY-MM-DD.json and ..._YYYY-MM-DD_HHMM.json).
+_DATE_FROM_FILENAME = re.compile(r'_(\d{4}-\d{2}-\d{2})(?:_\d{4})?\.json$')
 
 
 def _as_of_from_meta_or_filename(filename: str, meta: dict) -> Optional[str]:
@@ -150,7 +201,9 @@ def _load_latest_cache(
     """
     safe = resolved.replace('=', '_').replace('/', '_')
     pattern = os.path.join(CACHE_DIR, f"opts_{safe}_*.json")
-    files = sorted(glob.glob(pattern), reverse=True)
+    # mtime (not filename) so the newest snapshot wins regardless of whether it
+    # was written with a date-only or an intraday-bucketed key.
+    files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
     for f in files:
         try:
             with open(f, 'r') as fh:
@@ -211,12 +264,16 @@ def fetch_options_chain(
             cached = json.load(f)
         calls = pd.DataFrame(cached['calls'])
         puts = pd.DataFrame(cached['puts'])
-        # Today's cache is fresh (not stale). Update meta for current caller.
-        meta = dict(cached['meta'])
-        meta['original_ticker'] = ticker.upper()
-        meta['proxy_used'] = proxy_used
-        meta.setdefault('stale', False)
-        return calls, puts, meta
+        # Only serve this bucket's cache if the chain is still usable. Re-running
+        # within the same bucket replays a known-good snapshot (cheap); a
+        # thin/empty file never freezes the bucket — we fall through to a fresh
+        # live fetch below.
+        if chain_is_usable(calls, puts):
+            meta = dict(cached['meta'])
+            meta['original_ticker'] = ticker.upper()
+            meta['proxy_used'] = proxy_used
+            meta.setdefault('stale', False)
+            return calls, puts, meta
 
     try:
         calls, puts = provider.get_option_chain(resolved, expiry)
