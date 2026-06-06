@@ -23,7 +23,7 @@ import os
 import re
 import json
 import glob
-from datetime import date
+from datetime import date, datetime
 from typing import Optional, Tuple, List
 
 import pandas as pd
@@ -73,10 +73,36 @@ def _chain_source(provider) -> str:
     return getattr(provider, 'name', DATA_PROVIDER)
 
 
+def _drop_expired(expiries: List[str]) -> List[str]:
+    """Remove expirations that have already passed.
+
+    Schwab's expiration list INCLUDES the most-recently-expired date and lists
+    it FIRST (e.g. on a weekend, the prior Friday; after the close, that day's
+    0DTE). Because fetch_options_chain picks ``available[0]`` when no expiry is
+    requested, that stale date was being sent to get_option_chain, which returns
+    an EMPTY map with NO exception — so FallbackProvider silently served
+    yfinance instead of Schwab (proven via data_health probe: exps[0]=expired
+    Friday → 0/0, nearest live expiry → 171/171 usable). Keeping only expiries
+    >= today fixes the selection while preserving today's still-live 0DTE for
+    the 9:25am pre-open recorder. Unparseable entries are kept, and if filtering
+    would empty the list we return it unchanged (defensive)."""
+    today = date.today()
+    kept = []
+    for e in expiries:
+        try:
+            d = datetime.strptime(str(e)[:10], "%Y-%m-%d").date()
+        except Exception:
+            kept.append(e)   # unparseable — keep rather than silently drop
+            continue
+        if d >= today:
+            kept.append(e)
+    return kept or list(expiries)
+
+
 def fetch_expiration_dates(ticker: str) -> List[str]:
-    """Return available expiration dates for a ticker's options."""
+    """Return available (non-expired) expiration dates for a ticker's options."""
     resolved, _ = _resolve_ticker(ticker)
-    return get_provider().get_expirations(resolved)
+    return _drop_expired(get_provider().get_expirations(resolved))
 
 
 def fetch_live_spot(ticker: str, provider=None) -> Optional[float]:
@@ -164,6 +190,7 @@ def fetch_options_chain(
     provider = get_provider()
 
     available = provider.get_expirations(resolved)
+    available = _drop_expired(available)   # never request an already-expired chain
 
     os.makedirs(CACHE_DIR, exist_ok=True)
 
