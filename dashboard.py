@@ -706,7 +706,7 @@ def _render_scan_results(results: dict, total: int) -> None:
                 cons_rows.append(row)
             if cons_rows:
                 df_cons = pd.DataFrame(cons_rows)
-                st.dataframe(df_cons, use_container_width=True)
+                st.dataframe(df_cons, width='stretch')
 
     # ── WATCH LIST ────────────────────────────────────────────────────
     if watch_only:
@@ -726,7 +726,7 @@ def _render_scan_results(results: dict, total: int) -> None:
                 row['Z-Score'] = s['factors']['zscore']
                 row['Score'] = s.get('composite_score', 0)
             watch_data.append(row)
-        st.dataframe(pd.DataFrame(watch_data), use_container_width=True)
+        st.dataframe(pd.DataFrame(watch_data), width='stretch')
 
     # ── FACTOR BREAKDOWN ──────────────────────────────────────────────
     if all_results:
@@ -752,7 +752,7 @@ def _render_scan_results(results: dict, total: int) -> None:
                         'Composite': r.get('composite_score', 0),
                     })
                 factor_rows.append(row)
-            st.dataframe(pd.DataFrame(factor_rows), use_container_width=True)
+            st.dataframe(pd.DataFrame(factor_rows), width='stretch')
 
     if errors:
         with st.expander(f'Errors ({len(errors)})'):
@@ -1278,7 +1278,7 @@ elif page == '📊 Stock Chart':
     if show_zscore:
         fig.update_yaxes(nticks=5, title_text='', row=4, col=1)
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     # ── Volume Profile Key Levels ─────────────────────────────────────────
     if show_vol_profile:
@@ -1556,7 +1556,7 @@ elif page == '🔁 Backtest':
         )
         dd_fig.update_xaxes(gridcolor='#1e2130')
         dd_fig.update_yaxes(gridcolor='#1e2130')
-        st.plotly_chart(dd_fig, use_container_width=True)
+        st.plotly_chart(dd_fig, width='stretch')
 
         # ── Trade P&L Distribution + Monthly Returns ─────────────────────
         dist_col, heat_col = st.columns(2)
@@ -1577,7 +1577,7 @@ elif page == '🔁 Backtest':
                 )
                 hist_fig.update_xaxes(gridcolor='#1e2130')
                 hist_fig.update_yaxes(gridcolor='#1e2130')
-                st.plotly_chart(hist_fig, use_container_width=True)
+                st.plotly_chart(hist_fig, width='stretch')
             else:
                 st.info('No completed trades to display.')
 
@@ -1607,7 +1607,7 @@ elif page == '🔁 Backtest':
                     paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
                     font=dict(color='#fafafa'),
                 )
-                st.plotly_chart(hm_fig, use_container_width=True)
+                st.plotly_chart(hm_fig, width='stretch')
             else:
                 st.info('Need at least 3 months of data for heatmap.')
 
@@ -1633,7 +1633,7 @@ elif page == '🔁 Backtest':
             )
             rs_fig.update_xaxes(gridcolor='#1e2130')
             rs_fig.update_yaxes(gridcolor='#1e2130')
-            st.plotly_chart(rs_fig, use_container_width=True)
+            st.plotly_chart(rs_fig, width='stretch')
 
         # ── Monte Carlo ───────────────────────────────────────────────────
         with st.expander('Monte Carlo Analysis'):
@@ -1661,7 +1661,7 @@ elif page == '🔁 Backtest':
                     )
                     mc_fig.update_xaxes(gridcolor='#1e2130')
                     mc_fig.update_yaxes(gridcolor='#1e2130')
-                    st.plotly_chart(mc_fig, use_container_width=True)
+                    st.plotly_chart(mc_fig, width='stretch')
 
         # ── Walk-Forward Validation + Alpha Scorecard ─────────────────────
         with st.expander('Walk-Forward Validation & Alpha Scorecard'):
@@ -2080,12 +2080,216 @@ elif page == '🔬 Fractal & Options':
     # of one long scroll. Streamlit executes every tab body each rerun, so
     # side effects (prediction logging above) are unaffected by this grouping.
     # ══════════════════════════════════════════════════════════════════════
-    tab_struct, tab_flow, tab_evidence, tab_track = st.tabs([
+    tab_yellowbox, tab_struct, tab_flow, tab_evidence, tab_track = st.tabs([
+        '🟨 Yellow Box',
         '🧬 Fractal Structure',
         '⚙️ Options Flow',
         '🧾 Evidence & Accuracy',
         '📈 Track Record',
     ])
+
+    # ──────────────────────────────────────────────────────────────────────
+    # TAB 0 — Yellow Box: Milk-RCG-style value box + laddered objectives.
+    # A horizontal "where is price in the auction" read that repaints on every
+    # Analyze (it reads the same recomputed `result`). Everything is drawn on
+    # the proxy price axis (the axis price_df lives on); target/display-unit
+    # levels are divided back to that axis via _am_ax() so SPY (ratio 1) and
+    # ES=F (ratio>1) both render, while labels show the real display price.
+    # ──────────────────────────────────────────────────────────────────────
+    with tab_yellowbox:
+        st.subheader(f"{result['ticker']} — Yellow Box")
+        st.caption(
+            "Milk-style value/objective map. The **yellow box** is the expected "
+            "(value) zone price holds most of the session; **objectives** are the "
+            "laddered targets above and below. Above the box sellers distribute "
+            "(unload inventory); below it buyers accumulate (value add). Rebuilds "
+            "every time you press **Analyze**."
+        )
+
+        _amdf = result['price_df'].tail(90)
+        _am_ratio = result.get('price_ratio', 1.0) if result.get('proxy_used') else 1.0
+
+        def _am_ax(v):
+            """Convert a display/target-unit price onto the proxy plotting axis."""
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                return None
+            return v / _am_ratio if _am_ratio > 1 else v
+
+        def _am_fmt(v):
+            return f"${v:,.2f}" if isinstance(v, (int, float)) else "n/a"
+
+        # ── Levels (display/target units unless noted) ─────────────────────
+        _am_floor1, _am_ceil1 = result.get('floor'), result.get('ceiling')
+        _am_r2 = (result.get('ranges') or {}).get('2sigma', {}) or {}
+        _am_floor2, _am_ceil2 = _am_r2.get('floor'), _am_r2.get('ceiling')
+
+        _am_est = result.get('estimated_close') or {}
+        _am_pivot_disp = _am_est.get('estimated_close')
+        if _am_pivot_disp is not None:
+            _am_pivot_ax = _am_ax(_am_pivot_disp)
+        else:
+            _am_pivot_disp = result.get('max_pain')   # proxy units (ax == disp at ratio 1)
+            _am_pivot_ax = _am_pivot_disp
+
+        _am_spot_ax = result.get('proxy_spot')        # already proxy axis
+        _am_spot_disp = result.get('spot_price')
+
+        _am_walls = result.get('options_walls') or {}
+        _am_cwall = _am_walls.get('strongest_call_wall')   # proxy units
+        _am_pwall = _am_walls.get('strongest_put_wall')    # proxy units
+
+        # Axis-space copies of the target-unit levels
+        _am_floor1_ax, _am_ceil1_ax = _am_ax(_am_floor1), _am_ax(_am_ceil1)
+        _am_floor2_ax, _am_ceil2_ax = _am_ax(_am_floor2), _am_ax(_am_ceil2)
+
+        fig_am = go.Figure()
+
+        # Candlestick backdrop (muted so the zones read clearly on top)
+        fig_am.add_trace(go.Candlestick(
+            x=_amdf.index, open=_amdf['Open'], high=_amdf['High'],
+            low=_amdf['Low'], close=_amdf['Close'], name='Price',
+            increasing_line_color='rgba(38,166,154,0.55)',
+            decreasing_line_color='rgba(239,83,80,0.55)',
+            increasing_fillcolor='rgba(38,166,154,0.28)',
+            decreasing_fillcolor='rgba(239,83,80,0.28)',
+            showlegend=False,
+        ))
+
+        # YELLOW BOX — the value zone (1σ floor ↔ ceiling)
+        if _am_floor1_ax is not None and _am_ceil1_ax is not None:
+            fig_am.add_hrect(
+                y0=_am_floor1_ax, y1=_am_ceil1_ax,
+                fillcolor='rgba(255,214,0,0.10)', line_width=0, layer='below',
+                annotation_text='YELLOW BOX · value zone',
+                annotation_position='top left',
+                annotation_font_color='#ffd600', annotation_font_size=12,
+            )
+        # Upper distribution zone (ceiling → seller objective)
+        if (_am_ceil1_ax is not None and _am_ceil2_ax is not None
+                and _am_ceil2_ax > _am_ceil1_ax):
+            fig_am.add_hrect(y0=_am_ceil1_ax, y1=_am_ceil2_ax,
+                             fillcolor='rgba(239,83,80,0.06)', line_width=0, layer='below')
+        # Lower accumulation zone (buyer objective → floor)
+        if (_am_floor1_ax is not None and _am_floor2_ax is not None
+                and _am_floor2_ax < _am_floor1_ax):
+            fig_am.add_hrect(y0=_am_floor2_ax, y1=_am_floor1_ax,
+                             fillcolor='rgba(38,166,154,0.06)', line_width=0, layer='below')
+
+        # ── Core horizontal levels ─────────────────────────────────────────
+        if _am_ceil1_ax is not None:
+            fig_am.add_hline(y=_am_ceil1_ax, line=dict(color='#ef5350', width=2),
+                             annotation_text=f"Ceiling {_am_fmt(_am_ceil1)}",
+                             annotation_position='right', annotation_font_color='#ef5350')
+        if _am_floor1_ax is not None:
+            fig_am.add_hline(y=_am_floor1_ax, line=dict(color='#26a69a', width=2),
+                             annotation_text=f"Floor {_am_fmt(_am_floor1)}",
+                             annotation_position='right', annotation_font_color='#26a69a')
+        if _am_ceil2_ax is not None:
+            fig_am.add_hline(y=_am_ceil2_ax, line=dict(color='#ef5350', width=1.5, dash='dash'),
+                             annotation_text=f"Seller Objective {_am_fmt(_am_ceil2)}",
+                             annotation_position='right', annotation_font_color='#ff8a80')
+        if _am_floor2_ax is not None:
+            fig_am.add_hline(y=_am_floor2_ax, line=dict(color='#26a69a', width=1.5, dash='dash'),
+                             annotation_text=f"Buyer Objective {_am_fmt(_am_floor2)}",
+                             annotation_position='right', annotation_font_color='#80cbc4')
+        if _am_pivot_ax is not None:
+            fig_am.add_hline(y=_am_pivot_ax, line=dict(color='#b0bec5', width=1.5, dash='dashdot'),
+                             annotation_text=f"Pivot {_am_fmt(_am_pivot_disp)}",
+                             annotation_position='left', annotation_font_color='#b0bec5')
+
+        # ── Option walls (proxy units) as secondary objective ticks ────────
+        def _am_in_band(v):
+            lo = _am_floor2_ax if _am_floor2_ax is not None else _am_floor1_ax
+            hi = _am_ceil2_ax if _am_ceil2_ax is not None else _am_ceil1_ax
+            return (v is not None and lo is not None and hi is not None
+                    and lo * 0.97 <= v <= hi * 1.03)
+
+        if _am_in_band(_am_cwall):
+            _cw_lbl = _am_cwall * _am_ratio if _am_ratio > 1 else _am_cwall
+            fig_am.add_hline(y=_am_cwall, line=dict(color='#ef9a9a', width=1, dash='dot'),
+                             annotation_text=f"Call wall {_am_fmt(_cw_lbl)}",
+                             annotation_position='left',
+                             annotation_font_color='#ef9a9a', annotation_font_size=10)
+        if _am_in_band(_am_pwall):
+            _pw_lbl = _am_pwall * _am_ratio if _am_ratio > 1 else _am_pwall
+            fig_am.add_hline(y=_am_pwall, line=dict(color='#a5d6a7', width=1, dash='dot'),
+                             annotation_text=f"Put wall {_am_fmt(_pw_lbl)}",
+                             annotation_position='left',
+                             annotation_font_color='#a5d6a7', annotation_font_size=10)
+
+        # ── Spot marker ────────────────────────────────────────────────────
+        if _am_spot_ax is not None:
+            fig_am.add_hline(y=_am_spot_ax, line=dict(color='#ff9800', width=1.5, dash='dot'))
+            fig_am.add_annotation(
+                xref='paper', x=0.5, y=_am_spot_ax, yref='y',
+                text=f"◆ Spot {_am_fmt(_am_spot_disp)}", showarrow=False,
+                font=dict(color='#ff9800', size=12), bgcolor='rgba(14,17,23,0.6)',
+            )
+
+        # ── Distribution / accumulation annotations (Milk's wording) ───────
+        if _am_ceil1_ax is not None:
+            _am_uy = (_am_ceil1_ax + _am_ceil2_ax) / 2 if _am_ceil2_ax else _am_ceil1_ax
+            fig_am.add_annotation(
+                xref='paper', x=0.03, y=_am_uy, yref='y', xanchor='left',
+                text="Sellers unload inventory on test —<br>resistive first attempts",
+                showarrow=False, align='left',
+                font=dict(color='#ef5350', size=11), bgcolor='rgba(14,17,23,0.55)',
+            )
+        if _am_floor1_ax is not None:
+            _am_ly = (_am_floor1_ax + _am_floor2_ax) / 2 if _am_floor2_ax else _am_floor1_ax
+            fig_am.add_annotation(
+                xref='paper', x=0.03, y=_am_ly, yref='y', xanchor='left',
+                text="Buyers value add on test —<br>supportive first attempts",
+                showarrow=False, align='left',
+                font=dict(color='#26a69a', size=11), bgcolor='rgba(14,17,23,0.55)',
+            )
+
+        # ── Bias flag ──────────────────────────────────────────────────────
+        _am_bias = result.get('bias', 'NEUTRAL')
+        _am_conf = result.get('confidence', 0)
+        _am_bcolor = ('#26a69a' if _am_bias == 'BULLISH'
+                      else '#ef5350' if _am_bias == 'BEARISH' else '#ff9800')
+        _am_barrow = '▲' if _am_bias == 'BULLISH' else '▼' if _am_bias == 'BEARISH' else '◆'
+        fig_am.add_annotation(
+            xref='paper', x=0.99, y=0.98, yref='paper', xanchor='right', yanchor='top',
+            text=f"{_am_barrow} {_am_bias} · {_am_conf:.0f}%", showarrow=False,
+            font=dict(color=_am_bcolor, size=14),
+            bgcolor='rgba(14,17,23,0.65)', bordercolor=_am_bcolor, borderwidth=1,
+        )
+
+        # ── Y-range padding so edge labels (and any drawn wall) aren't clipped ─
+        _am_extra = [w for w in (_am_cwall, _am_pwall) if _am_in_band(w)]
+        _am_ys = [v for v in [_am_floor2_ax, _am_floor1_ax, _am_ceil1_ax, _am_ceil2_ax,
+                              _am_spot_ax, _am_pivot_ax, *_am_extra,
+                              float(_amdf['Low'].min()), float(_amdf['High'].max())]
+                  if v is not None]
+        if _am_ys:
+            _am_lo, _am_hi = min(_am_ys), max(_am_ys)
+            _am_pad = (_am_hi - _am_lo) * 0.06 or 1.0
+            fig_am.update_yaxes(range=[_am_lo - _am_pad, _am_hi + _am_pad])
+
+        fig_am.update_layout(
+            height=640, template='plotly_dark',
+            paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
+            font=dict(color='#fafafa'),
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=10, r=10, t=40, b=10), showlegend=False,
+            title=dict(text=f"{result['ticker']} Yellow Box — objectives bracket the value box",
+                       font=dict(size=15, color='#fafafa')),
+        )
+        fig_am.update_xaxes(gridcolor='#1e2130')
+        fig_am.update_yaxes(gridcolor='#1e2130')
+        st.plotly_chart(fig_am, use_container_width=True)
+
+        st.caption(
+            f"Value box {_am_fmt(_am_floor1)} – {_am_fmt(_am_ceil1)}  ·  "
+            f"Seller objective {_am_fmt(_am_ceil2)}  ·  Buyer objective {_am_fmt(_am_floor2)}  ·  "
+            f"Pivot {_am_fmt(_am_pivot_disp)}  ·  Spot {_am_fmt(_am_spot_disp)}.  "
+            "Break above the box → rotate to the seller objective; break below → "
+            "rotate to the buyer objective; rejection → revert to pivot."
+        )
 
     # ──────────────────────────────────────────────────────────────────────
     # TAB 1 — Fractal Structure: chart + vectors + neurals + confluence detail
@@ -2721,7 +2925,7 @@ elif page == '🔬 Fractal & Options':
                         'actual_close', 'close_abs_err', 'naive_abs_err', 'skill',
                         'in_range', 'dir_correct',
                     ] if c in show.columns]
-                    st.dataframe(show[cols].head(60), use_container_width=True)
+                    st.dataframe(show[cols].head(60), width='stretch')
         except Exception as e:
             st.warning(f'Could not load track record: {e}')
 
