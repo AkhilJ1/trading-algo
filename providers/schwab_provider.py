@@ -175,10 +175,22 @@ class SchwabProvider(DataProvider):
         start = _period_to_start(period)
         end = datetime.now()
 
-        # The app only ever requests daily candles ('1d'). Use Schwab's daily
-        # convenience endpoint, which sets the correct period/frequency types.
+        # Daily is the default; intraday ranges (the Yellow Box live chart) map
+        # to Schwab's minute-frequency endpoints. Anything unrecognized falls
+        # back to the daily endpoint, so existing daily callers are unaffected.
+        _iv = (interval or '').strip().lower()
+        _minute_endpoints = {
+            '1m': getattr(client, 'get_price_history_every_minute', None),
+            '5m': getattr(client, 'get_price_history_every_five_minutes', None),
+            '10m': getattr(client, 'get_price_history_every_ten_minutes', None),
+            '15m': getattr(client, 'get_price_history_every_fifteen_minutes', None),
+            '30m': getattr(client, 'get_price_history_every_thirty_minutes', None),
+        }
+        _endpoint = _minute_endpoints.get(_iv)
+        if _endpoint is None:
+            _endpoint = client.get_price_history_every_day
         try:
-            resp = client.get_price_history_every_day(
+            resp = _endpoint(
                 symbol,
                 start_datetime=start,
                 end_datetime=end,

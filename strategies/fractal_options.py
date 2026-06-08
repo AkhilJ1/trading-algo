@@ -1056,6 +1056,7 @@ def compute_composite_analysis(
     return {
         'ticker': ticker.upper(),
         'resolved_ticker': resolved,
+        'proxy_ticker': price_ticker,
         'proxy_used': proxy_used,
         'spot_price': round(display_spot, 2),
         'proxy_spot': round(spot, 2),
