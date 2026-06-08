@@ -1070,6 +1070,12 @@ def compute_composite_analysis(
         'source': meta.get('source'),
         'stale': bool(meta.get('stale', False)),
         'as_of': meta.get('as_of'),
+        # When the requested expiry's live chain is unusable (e.g. after hours)
+        # and no cached snapshot for it exists, the data layer serves the most
+        # recent available expiry instead. Surface that so the UI never presents
+        # a substituted expiry's dealer pin / GEX / walls as the one requested.
+        'requested_expiry': meta.get('requested_expiry'),
+        'expiry_substituted': bool(meta.get('expiry_substituted', False)),
         'floor': round(display_floor, 2),
         'ceiling': round(display_ceiling, 2),
         'bias': bias,
