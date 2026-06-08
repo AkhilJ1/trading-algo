@@ -2131,15 +2131,20 @@ elif page == '🔬 Fractal & Options':
         except Exception:
             _yb_market_open = False
 
-        # Robinhood-style presets. Intraday ranges pull fresh Schwab minute bars
-        # (yfinance only if Schwab is down); 3M/1Y reuse the daily series already
-        # fetched (also Schwab-sourced) in the result dict.
+        # Robinhood-style presets. Intraday ranges (1D/1W) pull fresh Schwab
+        # minute bars (yfinance only if Schwab is down); 1M/3M/1Y reuse the daily
+        # series already fetched (also Schwab-sourced) in the result dict.
+        #   win_days — calendar-day lookback the view is clipped to, so neither a
+        #     provider over-fetch nor a weekend fallback can widen the x-axis.
+        #   widen_period — 1D only: if the requested 1-day minute window is empty
+        #     (weekend / pre-open), refetch this wider window and clip back to the
+        #     last completed session, so 1D still shows a real intraday chart.
         _YB_RANGES = {
-            '1D': dict(period='1d',  interval='1m',  intraday=True,  tail=0),
-            '1W': dict(period='5d',  interval='15m', intraday=True,  tail=0),
-            '1M': dict(period='1mo', interval='1d',  intraday=True,  tail=0),
-            '3M': dict(period='',    interval='',    intraday=False, tail=63),
-            '1Y': dict(period='',    interval='',    intraday=False, tail=252),
+            '1D': dict(period='1d',  interval='1m',  intraday=True,  win_days=1,   tail=2,   widen_period='5d'),
+            '1W': dict(period='5d',  interval='15m', intraday=True,  win_days=7,   tail=5),
+            '1M': dict(period='1mo', interval='1d',  intraday=False, win_days=31,  tail=22),
+            '3M': dict(period='',    interval='',    intraday=False, win_days=93,  tail=63),
+            '1Y': dict(period='',    interval='',    intraday=False, win_days=366, tail=252),
         }
 
         @st.fragment(run_every=("30s" if _yb_market_open else None))
@@ -2167,6 +2172,14 @@ elif page == '🔬 Fractal & Options':
                         _am_sym, period=_spec['period'],
                         interval=_spec['interval'], use_cache=False,
                     )
+                    # Weekend / pre-open: the 1-day minute window has no bars yet.
+                    # Refetch a wider window so we can still show the most recent
+                    # completed session (clipped back below) rather than blanking.
+                    if (_d is None or _d.empty) and _spec.get('widen_period'):
+                        _d = fetch_stock_data(
+                            _am_sym, period=_spec['widen_period'],
+                            interval=_spec['interval'], use_cache=False,
+                        )
                     if _d is not None and not _d.empty:
                         _amdf = _d[['Open', 'High', 'Low', 'Close']].dropna()
                 except Exception:
@@ -2175,6 +2188,23 @@ elif page == '🔬 Fractal & Options':
                 _amdf = result['price_df'].tail(_spec['tail'] or 90)
                 if _spec['intraday']:
                     _src_note = ' · intraday unavailable — showing daily'
+
+            # Clip to the preset's lookback window. This is what fixes the
+            # "1M shows years of history back to ~2000" bug: schwab-py's daily
+            # endpoint forces period=TWENTY_YEARS (ignoring our start_datetime),
+            # and any daily fallback can also carry far more than the selected
+            # range — so bound the view by date here. For 1D, isolate just the
+            # latest completed session (today during RTH, else the last trading
+            # day captured by the widened fetch).
+            if isinstance(_amdf.index, pd.DatetimeIndex) and not _amdf.empty:
+                _last_ts = _amdf.index.max()
+                if _yb_range == '1D':
+                    _cutoff = _last_ts.normalize()
+                else:
+                    _cutoff = _last_ts.normalize() - pd.Timedelta(days=_spec['win_days'] - 1)
+                _clipped = _amdf[_amdf.index >= _cutoff]
+                if not _clipped.empty:
+                    _amdf = _clipped
 
             with _c1:
                 if market_open:
