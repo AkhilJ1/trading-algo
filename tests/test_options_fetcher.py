@@ -151,3 +151,62 @@ def test_fetch_skips_expired_first_expiry(tmp_cache, monkeypatch):
     assert meta["expiry"] == future       # picked the live expiry, not the expired one
     assert meta["source"] == "schwab"     # so Schwab serves the chain (no fallback)
     assert len(calls) == 12
+
+
+# ── expiry-faithful stale fallback (the "dealer pin shows the wrong date" bug) ─
+def _prime_two_expiries(monkeypatch, tmp_cache, near, far):
+    """Cache GOOD snapshots for two future expiries, then force the NEAR one to be
+    the newest by mtime — i.e. the exact weekend setup where the most-recently
+    cached chain is the nearest expiry, not the one the user is asking about."""
+    import glob as _glob
+    good = FakeProvider(name="schwab", expirations=[near, far],
+                        chain=(make_chain(12), make_chain(12)))
+    _use_provider(monkeypatch, good)
+    fetch_options_chain("SPY", far, use_cache=False)    # far cache first
+    fetch_options_chain("SPY", near, use_cache=False)   # near cache second
+    # Make NEAR strictly newest regardless of filesystem mtime granularity.
+    import os as _os
+    far_f = _glob.glob(_os.path.join(tmp_cache, f"opts_SPY_{far}_*.json"))[0]
+    near_f = _glob.glob(_os.path.join(tmp_cache, f"opts_SPY_{near}_*.json"))[0]
+    _os.utime(far_f, (1_000, 1_000))
+    _os.utime(near_f, (2_000, 2_000))
+
+
+def test_unusable_live_serves_requested_expiry_not_newest_cache(tmp_cache, monkeypatch):
+    """The core bug: requesting the monthly (far) expiry after hours must serve
+    the cached FAR chain — never the newer cached NEAR expiry behind the same
+    label, which made the dealer pin / GEX / walls read for the wrong date."""
+    from datetime import date, timedelta
+    near = (date.today() + timedelta(days=3)).isoformat()
+    far = (date.today() + timedelta(days=11)).isoformat()
+    _prime_two_expiries(monkeypatch, tmp_cache, near, far)
+
+    # Live now returns an unusable (weekend) chain for every expiry.
+    bad = FakeProvider(name="schwab", expirations=[near, far],
+                       chain=(make_chain(1), make_chain(1)))
+    _use_provider(monkeypatch, bad)
+    calls, puts, meta = fetch_options_chain("SPY", far, use_cache=False)
+    assert meta["expiry"] == far                       # served the expiry asked for
+    assert meta["stale"] is True                       # from last-known-good cache
+    assert not meta.get("expiry_substituted")          # no silent swap
+    assert meta.get("requested_expiry") is None
+
+
+def test_unusable_live_substitutes_and_flags_when_requested_expiry_uncached(tmp_cache, monkeypatch):
+    """If no snapshot exists for the requested expiry, the newest-overall chain is
+    served BUT flagged, so the UI can say which expiry it actually showed instead
+    of silently presenting the nearest expiry as the requested one."""
+    from datetime import date, timedelta
+    near = (date.today() + timedelta(days=3)).isoformat()
+    far = (date.today() + timedelta(days=11)).isoformat()
+    uncached = (date.today() + timedelta(days=20)).isoformat()
+    _prime_two_expiries(monkeypatch, tmp_cache, near, far)
+
+    bad = FakeProvider(name="schwab", expirations=[near, far, uncached],
+                       chain=(make_chain(1), make_chain(1)))
+    _use_provider(monkeypatch, bad)
+    calls, puts, meta = fetch_options_chain("SPY", uncached, use_cache=False)
+    assert meta["expiry"] == near                      # newest available snapshot
+    assert meta["expiry_substituted"] is True          # and it is flagged
+    assert meta["requested_expiry"] == uncached
+    assert meta["stale"] is True

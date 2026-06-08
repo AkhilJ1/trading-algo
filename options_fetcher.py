@@ -187,6 +187,7 @@ def _load_latest_cache(
     original: str,
     proxy_used: bool,
     require_usable: bool = True,
+    expiry: Optional[str] = None,
 ):
     """
     Find and load the most recent cached options data for a ticker.
@@ -194,6 +195,18 @@ def _load_latest_cache(
     When `require_usable=True` (default), skips any cached file whose chain
     fails chain_is_usable() — this protects against propagating bad snapshots
     that may have been written by older code paths.
+
+    When `expiry` is given, a snapshot for THAT expiry is preferred over any
+    other. This is the expiry-faithful fallback: outside market hours the live
+    chain for every expiry comes back stale (NaN IV / ~0 OI) and fails the
+    usability gate, so we serve last-known-good — but the last-known-good must
+    not silently be a DIFFERENT expiry than the user asked for. Asking for the
+    monthly 2026-06-18 after the close must serve the cached 2026-06-18, never
+    the cached nearest 2026-06-08 behind the same label (which made the whole
+    analysis — dealer pin, GEX, walls — read for the wrong date). If no snapshot
+    for the requested expiry exists, we fall back to the newest snapshot of any
+    expiry and TAG it (meta['expiry_substituted']=True, meta['requested_expiry'])
+    so the UI can say which expiry it actually served.
 
     Returns (calls, puts, meta) where meta includes:
         meta['stale'] = True
@@ -204,16 +217,17 @@ def _load_latest_cache(
     # mtime (not filename) so the newest snapshot wins regardless of whether it
     # was written with a date-only or an intraday-bucketed key.
     files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-    for f in files:
+
+    def _load_one(f):
         try:
             with open(f, 'r') as fh:
                 cached = json.load(fh)
             calls = pd.DataFrame(cached.get('calls', []))
             puts = pd.DataFrame(cached.get('puts', []))
             if calls.empty and puts.empty:
-                continue
+                return None
             if require_usable and not chain_is_usable(calls, puts):
-                continue
+                return None
             meta = dict(cached.get('meta', {}))
             meta['original_ticker'] = original
             meta['proxy_used'] = proxy_used
@@ -222,7 +236,32 @@ def _load_latest_cache(
             meta['cache_file'] = os.path.basename(f)
             return calls, puts, meta
         except Exception:
+            return None
+
+    # Pass 1 — a snapshot for the EXACT requested expiry (newest by mtime).
+    # The filename encodes the expiry as the component right after the ticker:
+    # opts_{safe}_{expiry}_{date}[_bucket].json — so a prefix match isolates it.
+    if expiry:
+        prefix = f"opts_{safe}_{expiry}_"
+        for f in files:
+            if not os.path.basename(f).startswith(prefix):
+                continue
+            hit = _load_one(f)
+            if hit is not None:
+                return hit  # served expiry == requested — no substitution
+
+    # Pass 2 — newest good snapshot of ANY expiry (true last-known-good). If it
+    # is a different expiry than requested, flag the substitution so callers and
+    # the UI never mistake it for the expiry that was asked for.
+    for f in files:
+        hit = _load_one(f)
+        if hit is None:
             continue
+        calls, puts, meta = hit
+        if expiry and str(meta.get('expiry')) != str(expiry):
+            meta['requested_expiry'] = expiry
+            meta['expiry_substituted'] = True
+        return calls, puts, meta
     return None
 
 
@@ -249,7 +288,8 @@ def fetch_options_chain(
 
     if not available:
         # After hours / source down: load most recent GOOD cache for this ticker.
-        cached_result = _load_latest_cache(resolved, ticker.upper(), proxy_used)
+        cached_result = _load_latest_cache(resolved, ticker.upper(), proxy_used,
+                                           expiry=expiry)
         if cached_result is not None:
             return cached_result
         return pd.DataFrame(), pd.DataFrame(), {}
@@ -279,7 +319,8 @@ def fetch_options_chain(
         calls, puts = provider.get_option_chain(resolved, expiry)
     except Exception:
         # Fetch failed — try most recent good cache.
-        cached_result = _load_latest_cache(resolved, ticker.upper(), proxy_used)
+        cached_result = _load_latest_cache(resolved, ticker.upper(), proxy_used,
+                                           expiry=expiry)
         if cached_result is not None:
             return cached_result
         return pd.DataFrame(), pd.DataFrame(), {}
@@ -295,7 +336,8 @@ def fetch_options_chain(
     # over a bad/empty snapshot — and crucially, do NOT cache the bad data.
     usable = chain_is_usable(calls, puts)
     if not usable:
-        cached_result = _load_latest_cache(resolved, ticker.upper(), proxy_used)
+        cached_result = _load_latest_cache(resolved, ticker.upper(), proxy_used,
+                                           expiry=expiry)
         if cached_result is not None:
             return cached_result
         # No good cache exists — return best-effort live data but don't persist it.

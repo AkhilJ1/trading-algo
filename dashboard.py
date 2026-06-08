@@ -1823,6 +1823,23 @@ elif page == '🔬 Fractal & Options':
             "The live chain is currently unavailable — the market is likely closed."
         )
 
+    # Expiry-substitution banner: when the requested expiry's live chain is
+    # unusable AND no cached snapshot exists for it, the data layer serves the
+    # most recent available expiry instead. Say so loudly — otherwise the dealer
+    # pin / GEX / walls / levels below silently read for a DIFFERENT date than
+    # the one selected (e.g. asking for 2026-06-18 after hours and seeing the
+    # nearest 2026-06-08 behind the same label).
+    if result.get('expiry_substituted') and result.get('requested_expiry'):
+        st.warning(
+            f"**{result['requested_expiry']} isn't available right now.** Its live "
+            "chain is unusable (market likely closed) and no recent "
+            f"{result['requested_expiry']} snapshot is cached, so this is the most "
+            f"recent available expiry: **{result['expiry']}**. The dealer pin, GEX, "
+            f"walls, and levels below are all for {result['expiry']}, not "
+            f"{result['requested_expiry']}. Re-run during market hours to pull the "
+            f"live {result['requested_expiry']} chain."
+        )
+
     # ══════════════════════════════════════════════════════════════════════
     # SECTION A: Bias Banner + Key Metrics
     # ══════════════════════════════════════════════════════════════════════
