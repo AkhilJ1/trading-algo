@@ -2272,7 +2272,7 @@ elif page == '🔬 Fractal & Options':
             if _am_pivot_ax is not None:
                 fig_am.add_hline(y=_am_pivot_ax, line=dict(color='#b0bec5', width=1.5, dash='dashdot'),
                                  annotation_text=f"Pivot {_am_fmt(_am_pivot_disp)}",
-                                 annotation_position='left', annotation_font_color='#b0bec5')
+                                 annotation_position='right', annotation_font_color='#b0bec5')
 
             # ── Option walls (proxy units) as secondary objective ticks ────
             def _am_in_band(v):
@@ -2285,13 +2285,13 @@ elif page == '🔬 Fractal & Options':
                 _cw_lbl = _am_cwall * _am_ratio if _am_ratio > 1 else _am_cwall
                 fig_am.add_hline(y=_am_cwall, line=dict(color='#ef9a9a', width=1, dash='dot'),
                                  annotation_text=f"Call wall {_am_fmt(_cw_lbl)}",
-                                 annotation_position='left',
+                                 annotation_position='right',
                                  annotation_font_color='#ef9a9a', annotation_font_size=10)
             if _am_in_band(_am_pwall):
                 _pw_lbl = _am_pwall * _am_ratio if _am_ratio > 1 else _am_pwall
                 fig_am.add_hline(y=_am_pwall, line=dict(color='#a5d6a7', width=1, dash='dot'),
                                  annotation_text=f"Put wall {_am_fmt(_pw_lbl)}",
-                                 annotation_position='left',
+                                 annotation_position='right',
                                  annotation_font_color='#a5d6a7', annotation_font_size=10)
 
             # ── Spot marker ────────────────────────────────────────────────
@@ -2356,7 +2356,7 @@ elif page == '🔬 Fractal & Options':
                 paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
                 font=dict(color='#fafafa'),
                 xaxis_rangeslider_visible=False,
-                margin=dict(l=10, r=150, t=46, b=24), showlegend=False,
+                margin=dict(l=55, r=150, t=46, b=24), showlegend=False,
                 title=dict(text=f"{result['ticker']} Yellow Box — objectives bracket the value box",
                            font=dict(size=15, color='#fafafa')),
             )
@@ -2364,13 +2364,16 @@ elif page == '🔬 Fractal & Options':
             fig_am.update_yaxes(gridcolor='#1e2130')
             st.plotly_chart(fig_am, use_container_width=True, key='yb_chart')
 
-            st.caption(
+            _yb_footer = (
                 f"Value box {_am_fmt(_am_floor1)} – {_am_fmt(_am_ceil1)}  ·  "
                 f"Seller objective {_am_fmt(_am_ceil2)}  ·  Buyer objective {_am_fmt(_am_floor2)}  ·  "
                 f"Pivot {_am_fmt(_am_pivot_disp)}  ·  Spot {_am_fmt(_am_spot_disp)}.  "
                 "Break above the box → rotate to the seller objective; break below → "
                 "rotate to the buyer objective; rejection → revert to pivot."
             )
+            # Escape '$' so Streamlit markdown doesn't treat paired '$…$' as LaTeX
+            # math (which renders the amounts in an inconsistent serif/math font).
+            st.caption(_yb_footer.replace("$", "\\$"))
 
         _yb_render()
 
