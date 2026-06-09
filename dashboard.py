@@ -3136,76 +3136,131 @@ elif page == '🔬 Fractal & Options':
             'naive error − model error, so positive means the pre-open pin added value.'
         )
         try:
-            from track_record import summarize_track_record as _pin_summarize
-            from sheets_logger import read_pin_outcomes, read_pin_outcomes_csv
+            from track_record import (
+                summarize_track_record as _pin_summarize,
+                join_predictions_outcomes as _pin_join,
+            )
+            from sheets_logger import (
+                read_pin_forecasts, read_pin_forecasts_csv,
+                read_pin_outcomes, read_pin_outcomes_csv,
+            )
 
+            # Read BOTH ledgers: the recorded forecasts (PinForecasts) and the
+            # grades (PinOutcomes). The section used to read only the graded
+            # store and hide everything until a forecast matured — so a pin
+            # logged this morning was invisible until the next evening. Now we
+            # surface the recorded forecast immediately (status "Pending") and
+            # layer the grade on once the session closes.
+            pin_fc = read_pin_forecasts() if _sheets_ok else read_pin_forecasts_csv()
             pin_df = read_pin_outcomes() if _sheets_ok else read_pin_outcomes_csv()
-            _tkr = result['ticker']
-            if pin_df is not None and not pin_df.empty and 'ticker' in pin_df.columns:
-                pin_out = pin_df[pin_df['ticker'].astype(str).str.upper() == _tkr.upper()].copy()
-            else:
-                pin_out = pin_df if pin_df is not None else pd.DataFrame()
+            _tkr = str(result['ticker']).upper()
 
-            psumm = _pin_summarize(pin_out)
-            if psumm['n_graded'] == 0:
+            def _pin_by_ticker(df):
+                if df is not None and not df.empty and 'ticker' in df.columns:
+                    return df[df['ticker'].astype(str).str.upper().str.strip() == _tkr].copy()
+                return df.copy() if df is not None and not df.empty else pd.DataFrame()
+
+            fc = _pin_by_ticker(pin_fc)
+            pin_out = _pin_by_ticker(pin_df)
+
+            if fc.empty:
                 st.info(
-                    f'No graded pre-open pin forecasts for {_tkr} yet. These are '
-                    'recorded before the open and graded after that day\'s close, so '
-                    'the scorecard fills in automatically as sessions mature.'
+                    f'No pre-open pin forecasts recorded for {_tkr} yet. The '
+                    'automation logs one before each open (~9:15 ET); it appears '
+                    'here as soon as it is recorded, then earns a grade after '
+                    'that day\'s close.'
                 )
             else:
-                pbeats = psumm['beats_naive']
-                if pbeats:
-                    st.success(
-                        f"✅ Pre-open pin beats the naive baseline — mean error "
-                        f"${psumm['mean_abs_err']:.2f} vs ${psumm['naive_mean_abs_err']:.2f} "
-                        f"for \"stays at spot\" across {psumm['n_graded']} graded forecast(s)."
-                    )
+                # Left-join each recorded forecast to its grade (blank if still
+                # pending). A forecast counts as graded once a realized close is
+                # attached.
+                joined = _pin_join(fc, pin_out)
+                if 'actual_close' in joined.columns:
+                    _ac = pd.to_numeric(joined['actual_close'], errors='coerce')
                 else:
-                    st.warning(
-                        f"⚠️ Pre-open pin not yet beating the naive baseline — mean error "
-                        f"${psumm['mean_abs_err']:.2f} vs ${psumm['naive_mean_abs_err']:.2f} "
-                        f"for \"stays at spot\" across {psumm['n_graded']} graded forecast(s)."
+                    _ac = pd.Series([float('nan')] * len(joined), index=joined.index)
+                joined['status'] = ['Graded' if pd.notna(v) else 'Pending' for v in _ac]
+
+                n_total = len(joined)
+                n_graded = int(_ac.notna().sum())
+                n_pending = n_total - n_graded
+                st.caption(f'{n_total} recorded · {n_graded} graded · {n_pending} pending')
+
+                # Headline skill scorecard — only meaningful once a forecast has
+                # actually matured against a realized close.
+                psumm = _pin_summarize(pin_out)
+                if psumm['n_graded'] > 0:
+                    if psumm['beats_naive']:
+                        st.success(
+                            f"✅ Pre-open pin beats the naive baseline — mean error "
+                            f"${psumm['mean_abs_err']:.2f} vs ${psumm['naive_mean_abs_err']:.2f} "
+                            f"for \"stays at spot\" across {psumm['n_graded']} graded forecast(s)."
+                        )
+                    else:
+                        st.warning(
+                            f"⚠️ Pre-open pin not yet beating the naive baseline — mean error "
+                            f"${psumm['mean_abs_err']:.2f} vs ${psumm['naive_mean_abs_err']:.2f} "
+                            f"for \"stays at spot\" across {psumm['n_graded']} graded forecast(s)."
+                        )
+
+                    pp1, pp2, pp3, pp4 = st.columns(4)
+                    pp1.metric('Graded Forecasts', psumm['n_graded'])
+                    _pskill = psumm['mean_skill']
+                    pp2.metric(
+                        'Mean Skill ($)',
+                        f"{_pskill:+.2f}" if _pskill is not None else '—',
+                        help='Avg ($) the pre-open pin beat the naive spot baseline by.',
+                    )
+                    pp3.metric(
+                        'Skill Rate',
+                        f"{psumm['skill_rate'] * 100:.0f}%" if psumm['skill_rate'] is not None else '—',
+                        help='Share of pre-open forecasts that beat the naive baseline.',
+                    )
+                    pp4.metric(
+                        'Direction Accuracy',
+                        f"{psumm['dir_accuracy'] * 100:.0f}%" if psumm['dir_accuracy'] is not None else '—',
+                        help='Share of pre-open forecasts that called up/down vs spot correctly.',
                     )
 
-                pp1, pp2, pp3, pp4 = st.columns(4)
-                pp1.metric('Graded Forecasts', psumm['n_graded'])
-                _pskill = psumm['mean_skill']
-                pp2.metric(
-                    'Mean Skill ($)',
-                    f"{_pskill:+.2f}" if _pskill is not None else '—',
-                    help='Avg ($) the pre-open pin beat the naive spot baseline by.',
-                )
-                pp3.metric(
-                    'Skill Rate',
-                    f"{psumm['skill_rate'] * 100:.0f}%" if psumm['skill_rate'] is not None else '—',
-                    help='Share of pre-open forecasts that beat the naive baseline.',
-                )
-                pp4.metric(
-                    'Direction Accuracy',
-                    f"{psumm['dir_accuracy'] * 100:.0f}%" if psumm['dir_accuracy'] is not None else '—',
-                    help='Share of pre-open forecasts that called up/down vs spot correctly.',
-                )
+                    pp5, pp6, pp7 = st.columns(3)
+                    pp5.metric('Mean Abs Error', f"${psumm['mean_abs_err']:.2f}")
+                    pp6.metric('Naive Baseline Error', f"${psumm['naive_mean_abs_err']:.2f}")
+                    pp7.metric(
+                        'In-Range Rate',
+                        f"{psumm['in_range_rate'] * 100:.0f}%" if psumm['in_range_rate'] is not None else '—',
+                        help='Share of realized closes inside the pre-open [floor, ceiling] band.',
+                    )
+                elif n_pending:
+                    st.info(
+                        f'{n_pending} pre-open pin forecast(s) recorded and awaiting a '
+                        'realized close — the skill scorecard fills in automatically '
+                        'after each session closes.'
+                    )
 
-                pp5, pp6, pp7 = st.columns(3)
-                pp5.metric('Mean Abs Error', f"${psumm['mean_abs_err']:.2f}")
-                pp6.metric('Naive Baseline Error', f"${psumm['naive_mean_abs_err']:.2f}")
-                pp7.metric(
-                    'In-Range Rate',
-                    f"{psumm['in_range_rate'] * 100:.0f}%" if psumm['in_range_rate'] is not None else '—',
-                    help='Share of realized closes inside the pre-open [floor, ceiling] band.',
+                # Always show the recorded forecasts themselves (newest first),
+                # with grade columns where a session has matured.
+                show = joined.copy()
+                if 'date' in show.columns:
+                    show['date'] = pd.to_datetime(show['date'], errors='coerce')
+                    show = show.sort_values('date', ascending=False)
+                disp_cols = [c for c in [
+                    'date', 'expiry', 'status', 'spot_price', 'estimated_close',
+                    'pin_target', 'max_pain', 'floor', 'ceiling',
+                    'actual_close', 'close_abs_err', 'naive_abs_err', 'skill',
+                    'in_range', 'dir_correct',
+                ] if c in show.columns]
+                rename = {
+                    'date': 'Pred Date', 'expiry': 'Expiry', 'status': 'Status',
+                    'spot_price': 'Spot', 'estimated_close': 'Est Close',
+                    'pin_target': 'Pin Target', 'max_pain': 'Max Pain',
+                    'floor': 'Floor', 'ceiling': 'Ceiling', 'actual_close': 'Actual',
+                    'close_abs_err': 'Abs Err', 'naive_abs_err': 'Naive Err',
+                    'skill': 'Skill', 'in_range': 'In Range', 'dir_correct': 'Dir OK',
+                }
+                st.dataframe(
+                    show[disp_cols].rename(columns=rename).head(60),
+                    width='stretch', hide_index=True,
                 )
-
-                with st.expander(f'Graded pre-open forecasts ({psumm["n_graded"]})'):
-                    pshow = pin_out.copy()
-                    pshow['pred_date'] = pd.to_datetime(pshow['pred_date'], errors='coerce')
-                    pshow = pshow.sort_values('pred_date', ascending=False)
-                    pcols = [c for c in [
-                        'pred_date', 'expiry', 'spot_at_pred', 'estimated_close',
-                        'actual_close', 'close_abs_err', 'naive_abs_err', 'skill',
-                        'in_range', 'dir_correct',
-                    ] if c in pshow.columns]
-                    st.dataframe(pshow[pcols].head(60), width='stretch')
         except Exception as e:
             st.warning(f'Could not load pre-open pin track record: {e}')
 
