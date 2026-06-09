@@ -107,3 +107,45 @@ def test_prediction_row_with_nan_estimate_is_json_compliant():
     )
     assert _json_ok(row)
     assert "SPY" in row
+
+
+# ── prediction dedupe identity (the shadowed-overnight-forecast bug) ─────────
+
+def test_dedupe_keeps_same_day_rows_with_different_expiries():
+    """The 1:16pm recorder's new overnight row (same date, NEXT expiry) must not
+    shadow the previous evening's still-ungraded forecast for TODAY's expiry —
+    that shadowing left the dealer-pin track record permanently empty."""
+    import pandas as pd
+    from sheets_logger import _dedupe_latest_predictions
+
+    df = pd.DataFrame([
+        # Yesterday-evening overnight forecast for today's expiry (matured,
+        # ungraded) — the row that was being silently dropped.
+        {"date": pd.Timestamp("2026-06-09"), "ticker": "SPY",
+         "expiry": "2026-06-09", "estimated_close": 739.91,
+         "timestamp": pd.Timestamp("2026-06-08 23:55:28")},
+        # Today's 1:16pm recording for tomorrow's expiry (later timestamp).
+        {"date": pd.Timestamp("2026-06-09"), "ticker": "SPY",
+         "expiry": "2026-06-10", "estimated_close": 734.68,
+         "timestamp": pd.Timestamp("2026-06-09 16:42:15")},
+    ])
+    out = _dedupe_latest_predictions(df)
+    assert len(out) == 2                       # both expiries survive
+    assert set(out["expiry"]) == {"2026-06-09", "2026-06-10"}
+
+
+def test_dedupe_still_collapses_same_day_same_expiry_reruns():
+    import pandas as pd
+    from sheets_logger import _dedupe_latest_predictions
+
+    df = pd.DataFrame([
+        {"date": pd.Timestamp("2026-06-09"), "ticker": "SPY",
+         "expiry": "2026-06-10", "estimated_close": 734.10,
+         "timestamp": pd.Timestamp("2026-06-09 13:16:00")},
+        {"date": pd.Timestamp("2026-06-09"), "ticker": "SPY",
+         "expiry": "2026-06-10", "estimated_close": 734.68,
+         "timestamp": pd.Timestamp("2026-06-09 16:42:15")},
+    ])
+    out = _dedupe_latest_predictions(df)
+    assert len(out) == 1                       # re-runs still collapse
+    assert float(out.iloc[0]["estimated_close"]) == 734.68   # latest wins

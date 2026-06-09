@@ -10,7 +10,7 @@ the local data/predictions.csv otherwise.
 
 Intended to be run once per (market) day by a scheduler. Running it more than
 once per day is harmless: read_predictions() keeps the latest row per ticker
-per day.
+per day per expiry.
 
 Usage:
     python daily_record.py            # records SPY (default)
