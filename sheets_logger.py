@@ -5,6 +5,7 @@ Works on Streamlit Cloud (st.secrets) and locally (env var / JSON file).
 Falls back to local CSV if Sheets is unavailable.
 """
 
+import math
 import os
 from datetime import date, datetime
 
@@ -147,13 +148,35 @@ def is_sheets_available() -> bool:
 
 
 def _num_or_blank(value, ndigits=2):
-    """Round a number for sheet storage, or '' if it is None/non-numeric."""
+    """Round a number for sheet storage, or '' if it is None/non-numeric/non-finite."""
     try:
         if value is None:
             return ""
-        return round(float(value), ndigits)
+        f = float(value)
+        return round(f, ndigits) if math.isfinite(f) else ""
     except (TypeError, ValueError):
         return ""
+
+
+def _cell_safe(value):
+    """Make one cell safe to write through gspread (value_input_option='RAW').
+
+    gspread serializes the row to JSON, and JSON has no NaN/Infinity — so a
+    single non-finite float raises "Out of range float values are not JSON
+    compliant" and rejects the ENTIRE row (this silently broke every graded
+    Outcomes write). Coerce non-finite numbers to a blank cell; leave strings,
+    bools, ints and finite floats untouched.
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return value  # None, "", or a normal string — write as-is
+    return value if math.isfinite(f) else ""
+
+
+def _json_safe(row):
+    """Sanitize a whole row so a stray NaN/inf can never reject the write."""
+    return [_cell_safe(v) for v in row]
 
 
 def _prediction_row(
@@ -165,15 +188,15 @@ def _prediction_row(
 ):
     """Build a Predictions row in PREDICTION_HEADERS order (shared by sheet/CSV)."""
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    return [
-        date_str, now, ticker, round(spot_price, 2),
-        round(floor, 2), round(ceiling, 2),
-        bias, round(confidence, 1), expiry,
+    return _json_safe([
+        date_str, now, ticker, _num_or_blank(spot_price),
+        _num_or_blank(floor), _num_or_blank(ceiling),
+        bias, _num_or_blank(confidence, 1), expiry,
         _num_or_blank(vix), _num_or_blank(gex_net), regime or "",
         _num_or_blank(estimated_close), _num_or_blank(pin_target),
         _num_or_blank(max_pain),
         spot_source or "", chain_source or "",
-    ]
+    ])
 
 
 def log_prediction(
@@ -211,10 +234,10 @@ def log_weight_change(weight_name, old_value, new_value, reason) -> bool:
     try:
         ss = get_spreadsheet()
         ws = _ensure_sheet(ss, GSHEET_WEIGHTS_SHEET, WEIGHT_HEADERS)
-        row = [
+        row = _json_safe([
             date.today().isoformat(), weight_name,
-            round(old_value, 4), round(new_value, 4), reason,
-        ]
+            _num_or_blank(old_value, 4), _num_or_blank(new_value, 4), reason,
+        ])
         ws.append_row(row, value_input_option="RAW")
         return True
     except Exception as e:
@@ -361,8 +384,8 @@ def log_outcome_csv(outcome: dict, path_name='outcomes.csv') -> bool:
 
 
 def _outcome_row(outcome: dict):
-    """Serialize an outcome dict into OUTCOME_HEADERS order."""
-    return [outcome.get(h, "") for h in OUTCOME_HEADERS]
+    """Serialize an outcome dict into OUTCOME_HEADERS order (NaN/inf → blank)."""
+    return _json_safe([outcome.get(h, "") for h in OUTCOME_HEADERS])
 
 
 def read_outcomes(sheet=GSHEET_OUTCOMES_SHEET, path_name='outcomes.csv') -> pd.DataFrame:
@@ -407,8 +430,8 @@ def _coerce_outcomes(df: pd.DataFrame) -> pd.DataFrame:
 # ── Calibration snapshots (range-engine drift tracking) ───────────────────
 
 def _calibration_row(snapshot: dict):
-    """Serialize a calibration snapshot dict into CALIBRATION_HEADERS order."""
-    return [snapshot.get(h, "") for h in CALIBRATION_HEADERS]
+    """Serialize a calibration snapshot dict into CALIBRATION_HEADERS order (NaN/inf → blank)."""
+    return _json_safe([snapshot.get(h, "") for h in CALIBRATION_HEADERS])
 
 
 def log_calibration(snapshot: dict) -> bool:
