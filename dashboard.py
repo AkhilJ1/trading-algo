@@ -1772,7 +1772,9 @@ elif page == '🔬 Fractal & Options':
     # ── Load active weights ──────────────────────────────────────────────
     from sheets_logger import (
         is_sheets_available, get_current_weights,
-        log_prediction, log_prediction_csv,
+        # NOTE: log_prediction / log_prediction_csv are intentionally NOT
+        # imported — the website never writes the forecast ledger (that is
+        # automation-only; see the "automation-only" note further below).
         read_predictions, read_predictions_csv,
         read_outcomes, read_outcomes_csv,
         read_weight_history, log_weight_change,
@@ -1892,6 +1894,10 @@ elif page == '🔬 Fractal & Options':
     conf = result['confidence']
     floor_val = result['floor']
     ceil_val = result['ceiling']
+    # Proxy→display price ratio. Defined once here, unconditionally, so the
+    # Fractal Structure tab (and Iron Condor levels) never NameError if the
+    # `ranges` dict happens to be empty.
+    r_ratio = result.get('price_ratio', 1.0) if result['proxy_used'] else 1.0
     banner = (f"**{bias}** — {conf:.0f}% Confidence  |  "
               f"Floor: ${floor_val:.2f}  |  Ceiling: ${ceil_val:.2f}")
     if bias == 'BULLISH':
@@ -1901,27 +1907,65 @@ elif page == '🔬 Fractal & Options':
     else:
         st.warning(banner)
 
-    # ── Confluence verdict (Fractal-Exchange-style structure read) ─────────
-    # How many independent structure + flow signals agree here, surfaced at
-    # the top instead of buried below the charts. Full detail (vectors,
-    # neurals, factor list) lives in the "Fractal Structure" tab.
+    # ── Why this flag? — the signals behind the directional bias ───────────
+    # A SECOND colored "confluence" banner used to render here. It is a
+    # separate structural read (compute_confluence) that can point the
+    # OPPOSITE way to the weighted-vote bias banner above — which is why SPY
+    # showed a green AND a red flag stacked at the top. We keep exactly ONE
+    # flag (the weighted bias above) and, instead of a competing banner, break
+    # down precisely which indicators hold it up. `confl` is still read: its
+    # factor list surfaces in the Fractal Structure tab, and its gamma-pin
+    # note is folded in below as a caption (not a contradictory flag).
     confl = result.get('confluence') or {}
-    if confl:
-        _cdir = confl.get('direction', 'neutral')
-        _clabel = confl.get('label', 'low')
-        _caligned = max(confl.get('bull', 0), confl.get('bear', 0))
-        _ctotal = confl.get('bull', 0) + confl.get('bear', 0)
-        _cicon = {'bullish': '🟢', 'bearish': '🔴'}.get(_cdir, '⚪')
-        _cpin = (' · sticky long-gamma (pin likely)' if confl.get('pin')
-                 else ' · slippery short-gamma (no pin)')
-        _cmsg = (f"{_cicon} **{_cdir.title()} confluence — {_clabel.upper()}** "
-                 f"({_caligned} of {_ctotal} signals aligned){_cpin}")
-        if _clabel == 'high':
-            st.success(_cmsg)
-        elif _clabel == 'medium':
-            st.info(_cmsg)
-        else:
-            st.warning(_cmsg)
+    _sigs = result.get('signals') or []
+    if _sigs:
+        _SIGNAL_LABELS = {
+            'options_walls': 'Options walls (OI)',
+            'gex_levels': 'Net GEX (dealer gamma)',
+            'iv_range': 'IV expected move',
+            'fractals': 'Fractal structure (S/R)',
+            'vectors': 'Sloped vectors',
+            'put_call_ratio': 'Put/Call ratio',
+            'iv_skew': 'IV skew',
+            'max_pain': 'Max pain',
+        }
+        # Re-derive the exact weighted tally _compute_bias() used so this
+        # explains THIS bias call rather than a fresh recomputation.
+        _bw = sum(s['weight'] for s in _sigs if s['bias'] == 'bullish')
+        _rw = sum(s['weight'] for s in _sigs if s['bias'] == 'bearish')
+        _nw = sum(s['weight'] for s in _sigs if s['bias'] == 'neutral')
+        _tot = _bw + _rw + _nw
+        _win = bias.lower()
+        _win_w = {'bullish': _bw, 'bearish': _rw, 'neutral': _nw}.get(_win, 0.0)
+        with st.expander(f"Why {bias}? — the signals behind this flag", expanded=True):
+            st.caption(
+                "Directional bias is a **weight-weighted vote** of the signals "
+                f"below. Bullish weight **{_bw:.2f}** · Bearish **{_rw:.2f}** · "
+                f"Neutral **{_nw:.2f}** → **{bias}** wins with **{conf:.0f}%** "
+                f"confidence ({_win_w:.2f} of {_tot:.2f} total weight). The ✔ rows "
+                "are the indicators currently holding this flag up."
+            )
+            _icon = {'bullish': '🟢 Bullish', 'bearish': '🔴 Bearish',
+                     'neutral': '⚪ Neutral'}
+            _rows = []
+            for s in sorted(_sigs, key=lambda x: x['weight'], reverse=True):
+                _rows.append({
+                    'Signal': _SIGNAL_LABELS.get(s['name'], s['name']),
+                    'Leans': _icon.get(s['bias'], s['bias']),
+                    'Weight': round(float(s['weight']), 3),
+                    'Drives flag': '✔' if s['bias'] == _win else '',
+                    'Evidence': s['evidence'],
+                })
+            st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+            if confl:
+                _aligned = max(confl.get('bull', 0), confl.get('bear', 0))
+                _ctot = confl.get('bull', 0) + confl.get('bear', 0)
+                _pin = ('sticky long-gamma → pin likely' if confl.get('pin')
+                        else 'slippery short-gamma → no pin')
+                st.caption(
+                    f"Structure confluence (separate read): **{_aligned} of {_ctot}** "
+                    f"signals aligned ({confl.get('label', 'low').upper()}) · {_pin}."
+                )
 
     # Key metrics row
     iv_range = result['iv_range']
@@ -1978,7 +2022,6 @@ elif page == '🔬 Fractal & Options':
         st.subheader('Iron Condor Range Levels')
         st.caption('Choose your confidence level for short strikes')
         rc1, rc2, rc3 = st.columns(3)
-        r_ratio = result.get('price_ratio', 1.0) if result['proxy_used'] else 1.0
         for col, (key, label) in zip(
             [rc1, rc2, rc3],
             [('1sigma', '1-Sigma (~68%)'), ('1_5sigma', '1.5-Sigma (~87%)'), ('2sigma', '2-Sigma (~95%)')],
@@ -2054,41 +2097,18 @@ elif page == '🔬 Fractal & Options':
               else 'Half Size' if vix_regime == 'elevated'
               else 'Cash Only' if vix_regime == 'crisis' else 'Unknown')
 
-    # ── Log prediction (after VIX is available) ───────────────────────────
-    if analyze_btn and 'error' not in result:
-        _gex_df = result.get('gex_df', pd.DataFrame())
-        _gex_net = float(_gex_df['net_gex'].sum()) if _gex_df is not None and not _gex_df.empty else None
-        _vix_val = current_vix if current_vix is not None else None
-        _regime_val = vix_regime if vix_regime != 'unknown' else None
-
-        logged = False
-        if _sheets_ok:
-            try:
-                logged = log_prediction(
-                    date_str=result.get('timestamp', '')[:10],
-                    ticker=result.get('ticker', ''),
-                    spot_price=result.get('spot_price', 0),
-                    floor=result.get('floor', 0),
-                    ceiling=result.get('ceiling', 0),
-                    bias=result.get('bias', ''),
-                    confidence=result.get('confidence', 0),
-                    expiry=result.get('expiry', ''),
-                    vix=_vix_val, gex_net=_gex_net, regime=_regime_val,
-                )
-            except Exception:
-                pass
-        if not logged:
-            log_prediction_csv(
-                date_str=result.get('timestamp', '')[:10],
-                ticker=result.get('ticker', ''),
-                spot_price=result.get('spot_price', 0),
-                floor=result.get('floor', 0),
-                ceiling=result.get('ceiling', 0),
-                bias=result.get('bias', ''),
-                confidence=result.get('confidence', 0),
-                expiry=result.get('expiry', ''),
-                vix=_vix_val, gex_net=_gex_net, regime=_regime_val,
-            )
+    # ── Prediction logging is automation-only (intentionally NOT here) ────
+    # The master forecast ledger (Predictions / Outcomes, and the pre-open
+    # PinForecasts / PinOutcomes) is written *exclusively* by the scheduled
+    # cloud jobs — daily_record.py (post-close) and record_preopen_pin.py
+    # (pre-open) — so the scored track record reflects fixed, point-in-time
+    # forecasts on a clean cadence. Clicking **Analyze** on the website is an
+    # ad-hoc, interactive look and must NEVER write to that ledger: a manual
+    # run (especially after the close, when the chain has rolled to the next
+    # expiry and the dealer-pin collapses toward spot) would shadow the
+    # automated row for that (date, ticker) — read_predictions keeps only the
+    # latest write — and silently corrupt the accuracy stats. Do not re-add a
+    # log_prediction() call in this code path.
 
     st.markdown('---')
 
@@ -2120,16 +2140,15 @@ elif page == '🔬 Fractal & Options':
             "(value) zone price holds most of the session; **objectives** are the "
             "laddered targets above and below. Above the box sellers distribute "
             "(unload inventory); below it buyers accumulate (value add). Pick a "
-            "range — **1D** plots 1-minute candles and auto-refreshes (~30s) while "
-            "the market is open. Levels rebuild each time you press **Analyze**."
+            "range — **1D** draws a Robinhood-style price line (1-minute, incl. "
+            "pre/post-market) whose tip tracks the live quote and auto-refreshes "
+            "(~30s) while the market is open. Levels rebuild each time you press "
+            "**Analyze**."
         )
 
-        # Regular-session check drives the live auto-refresh cadence.
-        try:
-            from options_fetcher import _is_market_hours as _yb_is_open
-            _yb_market_open = bool(_yb_is_open())
-        except Exception:
-            _yb_market_open = False
+        # The live session state is re-checked INSIDE the fragment each cycle
+        # (not captured once here), so a page opened pre-open begins refreshing
+        # the instant the 9:30 ET open arrives — see _yb_render below.
 
         # Robinhood-style presets. Intraday ranges (1D/1W) pull fresh Schwab
         # minute bars (yfinance only if Schwab is down); 1M/3M/1Y reuse the daily
@@ -2140,15 +2159,24 @@ elif page == '🔬 Fractal & Options':
         #     (weekend / pre-open), refetch this wider window and clip back to the
         #     last completed session, so 1D still shows a real intraday chart.
         _YB_RANGES = {
-            '1D': dict(period='1d',  interval='1m',  intraday=True,  win_days=1,   tail=2,   widen_period='5d'),
+            '1D': dict(period='1d',  interval='1m',  intraday=True,  extended=True, win_days=1,   tail=2,   widen_period='5d'),
             '1W': dict(period='5d',  interval='15m', intraday=True,  win_days=7,   tail=5),
             '1M': dict(period='1mo', interval='1d',  intraday=False, win_days=31,  tail=22),
             '3M': dict(period='',    interval='',    intraday=False, win_days=93,  tail=63),
             '1Y': dict(period='',    interval='',    intraday=False, win_days=366, tail=252),
         }
 
-        @st.fragment(run_every=("30s" if _yb_market_open else None))
-        def _yb_render(result=result, market_open=_yb_market_open):
+        @st.fragment(run_every="30s")
+        def _yb_render(result=result):
+            # Always tick every 30s; re-evaluate the session each cycle so the
+            # view auto-starts at the 9:30 ET open, and so the fetch/quote calls
+            # only hit the feed while live (cached when closed — see use_cache
+            # and the spot re-quote guard below).
+            try:
+                from options_fetcher import _is_market_hours as _yb_is_open
+                market_open = bool(_yb_is_open())
+            except Exception:
+                market_open = False
             _am_ratio = result.get('price_ratio', 1.0) if result.get('proxy_used') else 1.0
             _am_sym = result.get('proxy_ticker') or result.get('ticker')
 
@@ -2164,28 +2192,63 @@ elif page == '🔬 Fractal & Options':
             # Candle source: Schwab-primary intraday for short ranges, daily
             # slice for long ranges. Always degrade to the daily series so the
             # chart never blanks (weekend / holiday / pre-open / feed outage).
-            _amdf, _src_note = None, ''
+            # `_is_intraday_data` stays False until a real intraday fetch lands,
+            # so the overnight x-axis break is only applied to true intraday bars
+            # (a daily fallback timestamped at midnight would otherwise be hidden
+            # entirely by that hourly break). `_eh_active` records whether the
+            # bars include pre/post-market.
+            _amdf, _src_note, _is_intraday_data, _eh_active = None, '', False, False
             if _spec['intraday']:
+                _want_eh = bool(_spec.get('extended')) and not result.get('proxy_used')
                 try:
                     from data_fetcher import fetch_stock_data
-                    _d = fetch_stock_data(
-                        _am_sym, period=_spec['period'],
-                        interval=_spec['interval'], use_cache=False,
-                    )
+                    _d = None
+                    if _want_eh:
+                        # 1D Robinhood view: pull 1-minute bars INCLUDING pre- and
+                        # post-market directly from yfinance. prepost=True is a
+                        # yfinance capability not exposed through the provider
+                        # interface, so we call it here and fall back to the
+                        # standard (RTH-only) provider path if it yields nothing.
+                        try:
+                            import yfinance as _yf
+                            _eh = _yf.Ticker(_am_sym).history(
+                                period=_spec['period'], interval=_spec['interval'],
+                                prepost=True,
+                            )
+                            if _eh is not None and not _eh.empty:
+                                if isinstance(_eh.index, pd.DatetimeIndex) and _eh.index.tz is not None:
+                                    _eh.index = _eh.index.tz_localize(None)
+                                _eh.columns = [str(c).strip().title() for c in _eh.columns]
+                                _d, _eh_active = _eh, True
+                        except Exception:
+                            _d, _eh_active = None, False
+                    if _d is None or _d.empty:
+                        # Fresh pull while the session is live; cached when closed
+                        # so the always-on 30s fragment doesn't hammer the feed.
+                        _d = fetch_stock_data(
+                            _am_sym, period=_spec['period'],
+                            interval=_spec['interval'], use_cache=(not market_open),
+                        )
+                        _eh_active = False
                     # Weekend / pre-open: the 1-day minute window has no bars yet.
                     # Refetch a wider window so we can still show the most recent
                     # completed session (clipped back below) rather than blanking.
                     if (_d is None or _d.empty) and _spec.get('widen_period'):
                         _d = fetch_stock_data(
                             _am_sym, period=_spec['widen_period'],
-                            interval=_spec['interval'], use_cache=False,
+                            interval=_spec['interval'], use_cache=(not market_open),
                         )
+                        _eh_active = False
                     if _d is not None and not _d.empty:
                         _amdf = _d[['Open', 'High', 'Low', 'Close']].dropna()
+                        _is_intraday_data = not _amdf.empty
+                        if _eh_active and _is_intraday_data:
+                            _src_note = ' · incl. pre/post'
                 except Exception:
-                    _amdf = None
+                    _amdf, _is_intraday_data, _eh_active = None, False, False
             if _amdf is None or _amdf.empty:
                 _amdf = result['price_df'].tail(_spec['tail'] or 90)
+                _is_intraday_data, _eh_active = False, False
                 if _spec['intraday']:
                     _src_note = ' · intraday unavailable — showing daily'
 
@@ -2238,8 +2301,23 @@ elif page == '🔬 Fractal & Options':
                 _am_pivot_disp = result.get('max_pain')   # proxy units (ax == disp at ratio 1)
                 _am_pivot_ax = _am_pivot_disp
 
+            # Live spot so the marker + Robinhood line tip track price during the
+            # ~30s auto-refresh. Only re-quote while the session is live (the
+            # always-on fragment must not hammer the quote feed overnight); when
+            # closed we keep the analysis-time spot. Quote the proxy/axis symbol
+            # so the value is already in plotting-axis units; derive the display
+            # price via the ratio.
             _am_spot_ax = result.get('proxy_spot')        # already proxy axis
             _am_spot_disp = result.get('spot_price')
+            if market_open:
+                try:
+                    from options_fetcher import fetch_live_spot as _yb_live_spot
+                    _q = _yb_live_spot(_am_sym)
+                    if _q and float(_q) > 0:
+                        _am_spot_ax = float(_q)
+                        _am_spot_disp = float(_q) * _am_ratio if _am_ratio > 1 else float(_q)
+                except Exception:
+                    pass
 
             _am_walls = result.get('options_walls') or {}
             _am_cwall = _am_walls.get('strongest_call_wall')   # proxy units
@@ -2251,15 +2329,55 @@ elif page == '🔬 Fractal & Options':
 
             fig_am = go.Figure()
 
-            # Candlestick backdrop (muted so the zones read clearly on top)
-            fig_am.add_trace(go.Candlestick(
-                x=_amdf.index, open=_amdf['Open'], high=_amdf['High'],
-                low=_amdf['Low'], close=_amdf['Close'], name='Price',
-                increasing_line_color='rgba(38,166,154,0.55)',
-                decreasing_line_color='rgba(239,83,80,0.55)',
-                increasing_fillcolor='rgba(38,166,154,0.28)',
-                decreasing_fillcolor='rgba(239,83,80,0.28)',
-                showlegend=False,
+            # ── Wall-in-band test + y-range, computed up front so the Robinhood
+            #    gradient fill can anchor to a fixed baseline at the chart floor.
+            def _am_in_band(v):
+                lo = _am_floor2_ax if _am_floor2_ax is not None else _am_floor1_ax
+                hi = _am_ceil2_ax if _am_ceil2_ax is not None else _am_ceil1_ax
+                return (v is not None and lo is not None and hi is not None
+                        and lo * 0.97 <= v <= hi * 1.03)
+
+            _am_close = _amdf['Close'].astype(float)
+            _am_extra = [w for w in (_am_cwall, _am_pwall) if _am_in_band(w)]
+            _am_ys = [v for v in [_am_floor2_ax, _am_floor1_ax, _am_ceil1_ax, _am_ceil2_ax,
+                                  _am_spot_ax, _am_pivot_ax, *_am_extra,
+                                  float(_am_close.min()), float(_am_close.max())]
+                      if v is not None]
+            _am_lo, _am_hi = (min(_am_ys), max(_am_ys))
+            _am_pad = (_am_hi - _am_lo) * 0.06 or 1.0
+            _yb_bottom, _yb_top = _am_lo - _am_pad, _am_hi + _am_pad
+
+            # ── Robinhood-style price line: a single Close line coloured by the
+            #    session direction (green up / red down) with a soft vertical
+            #    gradient fill, in place of candlesticks. On the live 1D view the
+            #    line is extended one bar-width to the latest quote so the tip
+            #    tracks price between 1-minute closes (the old candles only
+            #    redrew once a minute and looked frozen). ──────────────────────
+            _yb_x = list(_amdf.index)
+            _yb_y = [float(v) for v in _am_close.values]
+            if (market_open and _spec.get('extended') and _am_spot_ax is not None
+                    and len(_yb_x) >= 1):
+                _yb_x = _yb_x + [_yb_x[-1] + pd.Timedelta(minutes=1)]
+                _yb_y = _yb_y + [float(_am_spot_ax)]
+            _yb_up = (_yb_y[-1] >= _yb_y[0]) if _yb_y else True
+            _yb_line = '#00c805' if _yb_up else '#ff5000'         # Robinhood green / red
+            _yb_fill_top = 'rgba(0,200,5,0.18)' if _yb_up else 'rgba(255,80,0,0.18)'
+            _yb_fill_bot = 'rgba(0,200,5,0.0)' if _yb_up else 'rgba(255,80,0,0.0)'
+            _yb_shape = 'spline' if _spec['intraday'] else 'linear'
+            # Invisible baseline at the chart floor; the price line fills down to
+            # it so the vertical gradient spans the visible area (fade to clear).
+            fig_am.add_trace(go.Scatter(
+                x=_yb_x, y=[_yb_bottom] * len(_yb_x), mode='lines',
+                line=dict(width=0), hoverinfo='skip', showlegend=False,
+            ))
+            fig_am.add_trace(go.Scatter(
+                x=_yb_x, y=_yb_y, mode='lines', name='Price',
+                line=dict(color=_yb_line, width=2.5, shape=_yb_shape,
+                          smoothing=(0.3 if _spec['intraday'] else 1.0)),
+                fill='tonexty',
+                fillgradient=dict(type='vertical',
+                                  colorscale=[[0.0, _yb_fill_bot], [1.0, _yb_fill_top]]),
+                showlegend=False, hovertemplate='%{y:.2f}<extra></extra>',
             ))
 
             # YELLOW BOX — the value zone (1σ floor ↔ ceiling)
@@ -2305,12 +2423,6 @@ elif page == '🔬 Fractal & Options':
                                  annotation_position='right', annotation_font_color='#b0bec5')
 
             # ── Option walls (proxy units) as secondary objective ticks ────
-            def _am_in_band(v):
-                lo = _am_floor2_ax if _am_floor2_ax is not None else _am_floor1_ax
-                hi = _am_ceil2_ax if _am_ceil2_ax is not None else _am_ceil1_ax
-                return (v is not None and lo is not None and hi is not None
-                        and lo * 0.97 <= v <= hi * 1.03)
-
             if _am_in_band(_am_cwall):
                 _cw_lbl = _am_cwall * _am_ratio if _am_ratio > 1 else _am_cwall
                 fig_am.add_hline(y=_am_cwall, line=dict(color='#ef9a9a', width=1, dash='dot'),
@@ -2364,22 +2476,22 @@ elif page == '🔬 Fractal & Options':
                 bgcolor='rgba(14,17,23,0.65)', bordercolor=_am_bcolor, borderwidth=1,
             )
 
-            # ── Y-range padding so edge labels (and any drawn wall) aren't clipped ─
-            _am_extra = [w for w in (_am_cwall, _am_pwall) if _am_in_band(w)]
-            _am_ys = [v for v in [_am_floor2_ax, _am_floor1_ax, _am_ceil1_ax, _am_ceil2_ax,
-                                  _am_spot_ax, _am_pivot_ax, *_am_extra,
-                                  float(_amdf['Low'].min()), float(_amdf['High'].max())]
-                      if v is not None]
-            if _am_ys:
-                _am_lo, _am_hi = min(_am_ys), max(_am_ys)
-                _am_pad = (_am_hi - _am_lo) * 0.06 or 1.0
-                fig_am.update_yaxes(range=[_am_lo - _am_pad, _am_hi + _am_pad])
+            # (Y-range was computed up front — _yb_bottom/_yb_top — so the
+            #  Robinhood gradient fill could anchor to the chart floor; it is
+            #  applied with the layout below.)
 
-            # ── X-axis: hide weekend gaps (and overnight gaps on intraday
-            #    equity views) so candles stay contiguous like Milk's chart.
+            # ── X-axis: always hide weekend gaps. Hide the intraday overnight
+            #    gap ONLY when we're actually plotting intraday bars (a daily
+            #    fallback timestamped at midnight would otherwise be hidden wholly
+            #    by an hourly break). With extended-hours bars present, hide only
+            #    20:00→04:00 ET so pre/post-market shows; otherwise hide the full
+            #    16:00→09:30 non-RTH window so the line stays contiguous.
             _yb_breaks = [dict(bounds=['sat', 'mon'])]
-            if _spec['intraday'] and not result.get('proxy_used'):
-                _yb_breaks.append(dict(bounds=[16, 9.5], pattern='hour'))
+            if _is_intraday_data and not result.get('proxy_used'):
+                if _eh_active:
+                    _yb_breaks.append(dict(bounds=[20, 4], pattern='hour'))
+                else:
+                    _yb_breaks.append(dict(bounds=[16, 9.5], pattern='hour'))
 
             fig_am.update_layout(
                 height=640, template='plotly_dark',
@@ -2391,7 +2503,7 @@ elif page == '🔬 Fractal & Options':
                            font=dict(size=15, color='#fafafa')),
             )
             fig_am.update_xaxes(gridcolor='#1e2130', rangebreaks=_yb_breaks)
-            fig_am.update_yaxes(gridcolor='#1e2130')
+            fig_am.update_yaxes(gridcolor='#1e2130', range=[_yb_bottom, _yb_top])
             st.plotly_chart(fig_am, use_container_width=True, key='yb_chart')
 
             _yb_footer = (
@@ -2476,7 +2588,7 @@ elif page == '🔬 Fractal & Options':
         # Max pain line
         fig_frac.add_hline(y=result['max_pain'], line=dict(color='#ff9800', width=1, dash='dot'),
                            row=1, col=1, annotation_text=f"Max Pain ${result['max_pain']:.0f} (info)",
-                           annotation_position='left')
+                           annotation_position='right')
 
         # Vectors — sloped dynamic support/resistance (Fractal-Exchange style),
         # projected across the visible window on the proxy price axis. A crossed
@@ -2509,7 +2621,7 @@ elif page == '🔬 Fractal & Options':
             fig_frac.add_hline(y=_yc, line=dict(color='#26a69a', width=1),
                                row=1, col=1,
                                annotation_text=f"Neural S ${_z['center']:.0f} (×{_z['bounces']})",
-                               annotation_position='left')
+                               annotation_position='right')
         for _z in (_neur.get('resistance_zones') or [])[:3]:
             _yc = _z['center'] / r_ratio if r_ratio > 1 else _z['center']
             if _z.get('strength', 0) < 2 or not (_vis_lo <= _yc <= _vis_hi):
@@ -2517,7 +2629,7 @@ elif page == '🔬 Fractal & Options':
             fig_frac.add_hline(y=_yc, line=dict(color='#ef5350', width=1),
                                row=1, col=1,
                                annotation_text=f"Neural R ${_z['center']:.0f} (×{_z['bounces']})",
-                               annotation_position='left')
+                               annotation_position='right')
 
         # Fractal dimension subplot
         if 'fractal_dimension' in price_df.columns:
@@ -2535,7 +2647,9 @@ elif page == '🔬 Fractal & Options':
         fig_frac.update_layout(
             height=650, xaxis_rangeslider_visible=False,
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-            margin=dict(t=50, b=20, l=0, r=80),
+            # l gutter keeps y-axis price ticks readable; wider r holds the
+            # right-anchored Max Pain / Neural labels (flipped off the y-axis).
+            margin=dict(t=50, b=20, l=55, r=140),
             paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
             font=dict(color='#fafafa'),
         )
@@ -2546,8 +2660,9 @@ elif page == '🔬 Fractal & Options':
         # ── Vectors / Neurals tables + confluence factor list ──────────────
         st.markdown('**Vectors, Neurals & Confluence**')
         st.caption('Sloped vectors (flip role on a cross) + horizontal neural '
-                   'zones (scored by repeated bounces) + options flow, tallied '
-                   'into the confluence verdict shown at the top of the page.')
+                   'zones (scored by repeated bounces) + options flow. The '
+                   'structure-confluence tally these feed is noted under the '
+                   'bias flag at the top; the per-factor votes are listed below.')
 
         _vcol, _ncol = st.columns(2)
         with _vcol:
@@ -2728,22 +2843,30 @@ elif page == '🔬 Fractal & Options':
         st.markdown('---')
 
         with st.expander('Raw Options Chain Data'):
-            from options_fetcher import fetch_options_chain as _fetch_chain
-            raw_c, raw_p, _ = _fetch_chain(result['ticker'])
-            display_cols = ['strike', 'lastPrice', 'bid', 'ask',
-                            'volume', 'openInterest', 'impliedVolatility']
-            available_cols_c = [c for c in display_cols if c in raw_c.columns]
-            available_cols_p = [c for c in display_cols if c in raw_p.columns]
+            # Gate the network fetch behind a checkbox: the expander body runs on
+            # every rerun (incl. the 30s Yellow Box refresh), so an unconditional
+            # fetch would re-hit the provider each time. Pull the SAME expiry the
+            # analysis used (not the provider's nearest default) so the raw chain
+            # matches the levels shown above.
+            _raw_expiry = result.get('expiry') or None
+            st.caption(f"Expiry: {_raw_expiry or 'nearest available'}")
+            if st.checkbox('Load raw chain', key='fo_raw_chain'):
+                from options_fetcher import fetch_options_chain as _fetch_chain
+                raw_c, raw_p, _ = _fetch_chain(result['ticker'], expiry=_raw_expiry)
+                display_cols = ['strike', 'lastPrice', 'bid', 'ask',
+                                'volume', 'openInterest', 'impliedVolatility']
+                available_cols_c = [c for c in display_cols if c in raw_c.columns]
+                available_cols_p = [c for c in display_cols if c in raw_p.columns]
 
-            rc1, rc2 = st.columns(2)
-            with rc1:
-                st.markdown('**Calls**')
-                if available_cols_c:
-                    st.dataframe(raw_c[available_cols_c].head(30))
-            with rc2:
-                st.markdown('**Puts**')
-                if available_cols_p:
-                    st.dataframe(raw_p[available_cols_p].head(30))
+                rc1, rc2 = st.columns(2)
+                with rc1:
+                    st.markdown('**Calls**')
+                    if available_cols_c:
+                        st.dataframe(raw_c[available_cols_c].head(30))
+                with rc2:
+                    st.markdown('**Puts**')
+                    if available_cols_p:
+                        st.dataframe(raw_p[available_cols_p].head(30))
 
     # ──────────────────────────────────────────────────────────────────────
     # TAB 3 — Evidence & Accuracy: VRP, signal evidence, range validation
@@ -2893,67 +3016,19 @@ elif page == '🔬 Fractal & Options':
     # TAB 4 — Track Record: live predictions, dealer-pin skill, auto-retune
     # ──────────────────────────────────────────────────────────────────────
     with tab_track:
-        st.subheader('Live Prediction Tracking')
-        st.caption('Historical log of predictions — compare predicted floor/ceiling vs actual closes')
-        try:
-            pred_df = read_predictions() if _sheets_ok else read_predictions_csv()
-            if not pred_df.empty:
-                ticker_preds = pred_df[pred_df['ticker'] == result['ticker']].tail(30)
-                if not ticker_preds.empty:
-                    scored_rows = []
-                    price_ticker = result['resolved_ticker'] if result['proxy_used'] else result['ticker']
-                    hist_df = fetch_stock_data(price_ticker, period='3mo')
-                    if not hist_df.empty and isinstance(hist_df.index, pd.DatetimeIndex):
-                        if hist_df.index.tz is not None:
-                            hist_df.index = hist_df.index.tz_localize(None)
-                        for _, pred in ticker_preds.iterrows():
-                            pred_date = pd.Timestamp(pred['date'])
-                            future = hist_df[hist_df.index > pred_date]
-                            if len(future) > 0:
-                                actual_close = float(future['Close'].iloc[0])
-                                in_range = pred['floor'] <= actual_close <= pred['ceiling']
-                                bias_correct = (
-                                    (pred['bias'] == 'BULLISH' and actual_close > pred['spot_price']) or
-                                    (pred['bias'] == 'BEARISH' and actual_close < pred['spot_price']) or
-                                    (pred['bias'] == 'NEUTRAL')
-                                )
-                                scored_rows.append({
-                                    'Date': str(pred['date'])[:10] if not pd.isna(pred['date']) else '',
-                                    'Spot': f"${pred['spot_price']:.2f}",
-                                    'Floor': f"${pred['floor']:.2f}",
-                                    'Ceiling': f"${pred['ceiling']:.2f}",
-                                    'Bias': pred['bias'],
-                                    'Actual Close': f"${actual_close:.2f}",
-                                    'In Range': 'Yes' if in_range else 'No',
-                                    'Bias Correct': 'Yes' if bias_correct else 'No',
-                                })
+        # NOTE: the old "Live Prediction Tracking" table was removed here. It
+        # scored each forecast against the *next* trading day's daily close
+        # (hist_df.index > pred_date), so same-day 0DTE forecasts never got a
+        # close ("requires at least one subsequent trading day") and it merely
+        # duplicated — less rigorously — the graded Outcomes views below. The
+        # scored ledgers (Dealer-Pin Close + Pre-Open Pin) are the single source
+        # of truth for accuracy, and they are fed only by the scheduled jobs.
 
-                    if scored_rows:
-                        scored_disp = pd.DataFrame(scored_rows)
-                        range_acc = scored_disp['In Range'].value_counts().get('Yes', 0) / len(scored_disp) * 100
-                        bias_acc = scored_disp['Bias Correct'].value_counts().get('Yes', 0) / len(scored_disp) * 100
-                        lt1, lt2, lt3 = st.columns(3)
-                        lt1.metric('Predictions Tracked', len(scored_disp))
-                        lt2.metric('Range Accuracy', f"{range_acc:.0f}%")
-                        lt3.metric('Bias Accuracy', f"{bias_acc:.0f}%")
-                        st.dataframe(scored_disp)
-                    else:
-                        st.info(f'{len(ticker_preds)} prediction(s) logged for {result["ticker"]}. '
-                                'Accuracy scoring requires at least one subsequent trading day.')
-                else:
-                    st.info(f'No predictions logged yet for {result["ticker"]}. Click Analyze to start tracking.')
-            else:
-                st.info('No predictions recorded yet. Click Analyze to start tracking.')
-                st.caption('Data source: ' + ('Google Sheets' if _sheets_ok else 'Local CSV (connect Google Sheets for persistence)'))
-        except Exception as e:
-            st.warning(f'Could not load predictions: {e}')
-
-        # ── Dealer-Pin Close — Scored Track Record (item 2) ───────────────────
-        # Reads the durable, graded Outcomes ledger (Step 3) and shows whether the
+        # ── Dealer-Pin Close — Scored Track Record ────────────────────────────
+        # Reads the durable, graded Outcomes ledger and shows whether the
         # dealer-pin estimated close actually beats the naive "price stays at spot"
         # baseline — net of nothing, just honest forecast-vs-realized error that
         # grows one trading day at a time.
-        st.markdown('---')
         st.subheader('Dealer-Pin Close — Track Record')
         st.caption(
             'Each matured forecast is scored against the realized close AND against '
@@ -3045,6 +3120,94 @@ elif page == '🔬 Fractal & Options':
                     st.dataframe(show[cols].head(60), width='stretch')
         except Exception as e:
             st.warning(f'Could not load track record: {e}')
+
+        # ── Pre-Open Pin — Scored Track Record (item 6) ───────────────────────
+        # The automation also records a SEPARATE pre-open pin forecast (~9:15 ET,
+        # before the open) into PinForecasts and grades it into PinOutcomes the
+        # next day. That ledger was being written + graded but never surfaced on
+        # the site — so the pre-open call had no visible scorecard. Same scoring
+        # math as the after-close pin (skill vs the naive "stays at spot" null),
+        # just sourced from the pin ledger.
+        st.markdown('---')
+        st.subheader('Pre-Open Pin — Track Record')
+        st.caption(
+            'A separate forecast logged before the open (~9:15 ET) and graded '
+            'against that day\'s realized close. Scored the same way: skill = '
+            'naive error − model error, so positive means the pre-open pin added value.'
+        )
+        try:
+            from track_record import summarize_track_record as _pin_summarize
+            from sheets_logger import read_pin_outcomes, read_pin_outcomes_csv
+
+            pin_df = read_pin_outcomes() if _sheets_ok else read_pin_outcomes_csv()
+            _tkr = result['ticker']
+            if pin_df is not None and not pin_df.empty and 'ticker' in pin_df.columns:
+                pin_out = pin_df[pin_df['ticker'].astype(str).str.upper() == _tkr.upper()].copy()
+            else:
+                pin_out = pin_df if pin_df is not None else pd.DataFrame()
+
+            psumm = _pin_summarize(pin_out)
+            if psumm['n_graded'] == 0:
+                st.info(
+                    f'No graded pre-open pin forecasts for {_tkr} yet. These are '
+                    'recorded before the open and graded after that day\'s close, so '
+                    'the scorecard fills in automatically as sessions mature.'
+                )
+            else:
+                pbeats = psumm['beats_naive']
+                if pbeats:
+                    st.success(
+                        f"✅ Pre-open pin beats the naive baseline — mean error "
+                        f"${psumm['mean_abs_err']:.2f} vs ${psumm['naive_mean_abs_err']:.2f} "
+                        f"for \"stays at spot\" across {psumm['n_graded']} graded forecast(s)."
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ Pre-open pin not yet beating the naive baseline — mean error "
+                        f"${psumm['mean_abs_err']:.2f} vs ${psumm['naive_mean_abs_err']:.2f} "
+                        f"for \"stays at spot\" across {psumm['n_graded']} graded forecast(s)."
+                    )
+
+                pp1, pp2, pp3, pp4 = st.columns(4)
+                pp1.metric('Graded Forecasts', psumm['n_graded'])
+                _pskill = psumm['mean_skill']
+                pp2.metric(
+                    'Mean Skill ($)',
+                    f"{_pskill:+.2f}" if _pskill is not None else '—',
+                    help='Avg ($) the pre-open pin beat the naive spot baseline by.',
+                )
+                pp3.metric(
+                    'Skill Rate',
+                    f"{psumm['skill_rate'] * 100:.0f}%" if psumm['skill_rate'] is not None else '—',
+                    help='Share of pre-open forecasts that beat the naive baseline.',
+                )
+                pp4.metric(
+                    'Direction Accuracy',
+                    f"{psumm['dir_accuracy'] * 100:.0f}%" if psumm['dir_accuracy'] is not None else '—',
+                    help='Share of pre-open forecasts that called up/down vs spot correctly.',
+                )
+
+                pp5, pp6, pp7 = st.columns(3)
+                pp5.metric('Mean Abs Error', f"${psumm['mean_abs_err']:.2f}")
+                pp6.metric('Naive Baseline Error', f"${psumm['naive_mean_abs_err']:.2f}")
+                pp7.metric(
+                    'In-Range Rate',
+                    f"{psumm['in_range_rate'] * 100:.0f}%" if psumm['in_range_rate'] is not None else '—',
+                    help='Share of realized closes inside the pre-open [floor, ceiling] band.',
+                )
+
+                with st.expander(f'Graded pre-open forecasts ({psumm["n_graded"]})'):
+                    pshow = pin_out.copy()
+                    pshow['pred_date'] = pd.to_datetime(pshow['pred_date'], errors='coerce')
+                    pshow = pshow.sort_values('pred_date', ascending=False)
+                    pcols = [c for c in [
+                        'pred_date', 'expiry', 'spot_at_pred', 'estimated_close',
+                        'actual_close', 'close_abs_err', 'naive_abs_err', 'skill',
+                        'in_range', 'dir_correct',
+                    ] if c in pshow.columns]
+                    st.dataframe(pshow[pcols].head(60), width='stretch')
+        except Exception as e:
+            st.warning(f'Could not load pre-open pin track record: {e}')
 
         # ── Signal Weights & Auto-Retune ──────────────────────────────────
         st.markdown('---')
