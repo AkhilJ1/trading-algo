@@ -276,16 +276,18 @@ def test_prediction_after_expiry_day_is_flagged():
     assert prediction_is_post_close(p) is True
 
 
-def test_legacy_utc_preopen_stamp_is_not_misread_as_post_close():
-    # Rows written before the 2026-06-10 cutover are naive UTC: 16:15 UTC is
-    # 09:15 PT (pre-open) — it must NOT be flagged as a 4:15pm post-close run.
-    p = _pred(expiry="2026-06-09", pred_time="2026-06-09 16:15:37")
+def test_migrated_preopen_stamp_is_not_flagged():
+    # Real migrated ledger row: the 2026-06-09 pre-open pin, recorded 09:15 PT
+    # (was 16:15 naive-UTC before migrate_timestamps_to_pacific.py ran).
+    p = _pred(expiry="2026-06-09", pred_time="2026-06-09 09:15:37")
     assert prediction_is_post_close(p) is False
 
 
-def test_legacy_utc_after_close_stamp_is_still_flagged():
-    # 23:48 UTC on the expiry day = 16:48 PT — recorded after the close.
-    p = _pred(expiry="2026-06-08", pred_time="2026-06-08 23:48:37")
+def test_migrated_after_close_stamp_is_flagged():
+    # Real migrated ledger row: the 2026-06-08 after-close recorder run at
+    # 16:48 PT on its own expiry day — recorded after the close already knew
+    # the outcome, so it must never be graded.
+    p = _pred(expiry="2026-06-08", pred_time="2026-06-08 16:48:37")
     assert prediction_is_post_close(p) is True
 
 

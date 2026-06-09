@@ -28,7 +28,7 @@ from datetime import datetime, time as dtime
 import numpy as np
 import pandas as pd
 
-from sheets_logger import pacific_now, _PT
+from sheets_logger import pacific_now
 
 # Below this absolute move we treat a close as "flat" rather than up/down, so a
 # forecast that lands essentially on spot is not scored as a directional call.
@@ -38,11 +38,10 @@ _FLAT_EPS = 1e-9
 # after D's close was made AFTER the outcome printed — it is not a forecast.
 _MARKET_CLOSE_PT = dtime(13, 0)
 
-# Ledger rows written before 2026-06-10 carry naive UTC timestamps (the loggers
-# used datetime.utcnow() back then); rows from that date on are Pacific. The
-# post-close guard converts pre-cutover stamps to Pacific so a legacy 16:15 UTC
-# (= 09:15 PT pre-open) forecast is not misread as a 4:15pm post-close one.
-_LEDGER_TZ_CUTOVER = pd.Timestamp("2026-06-10")
+# All ledger timestamps are naive Pacific. Rows written before 2026-06-09 were
+# naive UTC (datetime.utcnow()); they were converted in place by the one-off
+# migrate_timestamps_to_pacific.py run on 2026-06-09, so no per-read timezone
+# interpretation is needed here.
 
 
 def _num(value):
@@ -175,8 +174,6 @@ def prediction_is_post_close(pred: dict) -> bool:
         return False  # not enough information — let the normal path decide
     if ts.tz is not None:
         ts = ts.tz_localize(None)
-    elif ts < _LEDGER_TZ_CUTOVER and _PT is not None:
-        ts = ts.tz_localize("UTC").tz_convert(_PT).tz_localize(None)
     if ts.normalize() > expiry:
         return True
     return ts.normalize() == expiry and ts.time() >= _MARKET_CLOSE_PT

@@ -3379,9 +3379,9 @@ elif page == '🔬 Fractal & Options':
                     )
                     # Plain date — casting to datetime renders a bogus 00:00:00.
                     show['date'] = show['date'].astype(str).str[:10]
-                # The ledger's `timestamp` is the actual recording moment
-                # (Pacific since 2026-06-10; UTC before). Surface it as the pred
-                # time so a 6:25am pre-open run reads as 06:25, not midnight.
+                # The ledger's `timestamp` is the actual recording moment in
+                # Pacific time (legacy UTC rows were migrated in place). Surface
+                # it as the pred time so a 6:25am run reads as 06:25, not midnight.
                 if 'timestamp' in show.columns:
                     _ts = pd.to_datetime(show['timestamp'], errors='coerce')
                     show['pred_time'] = _ts.dt.strftime('%H:%M').fillna('—')
