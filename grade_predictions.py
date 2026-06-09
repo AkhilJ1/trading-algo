@@ -39,7 +39,12 @@ def _realized_close(ticker: str, expiry: str):
     exp = pd.to_datetime(expiry, errors="coerce")
     if pd.isna(exp):
         return None
-    df = fetch_stock_data(ticker, period="3mo", interval="1d", use_cache=True)
+    # use_cache=False: grading runs the evening of the expiry day, when a
+    # same-day cache file may have been written intraday — before the bar
+    # settled — and data_fetcher drops the unfinished (NaN-close) row. Reading
+    # that stale cache would hide the just-settled close and leave the forecast
+    # wrongly "pending" forever. Always pull fresh so the realized close is seen.
+    df = fetch_stock_data(ticker, period="3mo", interval="1d", use_cache=False)
     if df is None or df.empty or "Close" not in df.columns:
         return None
     idx = pd.to_datetime(df.index)
@@ -80,7 +85,13 @@ def main(argv=None) -> int:
             print(f"  [{ticker} {expiry}] skipped — {e}")
             continue
 
-        logged = (log_outcome(outcome) if sheets_ok else False) or log_outcome_csv(outcome)
+        # When Sheets is the source of truth, require the Sheets write to
+        # succeed — do NOT fall back to an ephemeral runner-local CSV that is
+        # discarded when the job ends. The old `log_outcome(...) or
+        # log_outcome_csv(...)` masked Sheets failures (e.g. a NaN cell) as
+        # "graded", which is exactly why the scorecard looked empty while the
+        # job reported success. CSV is only the destination when Sheets is absent.
+        logged = log_outcome(outcome) if sheets_ok else log_outcome_csv(outcome)
         if logged:
             graded += 1
             print(

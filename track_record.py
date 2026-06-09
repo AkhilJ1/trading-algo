@@ -22,6 +22,7 @@ DataFrames out. The network-touching part (fetching the realized close) lives
 in grade_predictions.py so this stays trivially testable.
 """
 
+import math
 from datetime import datetime
 
 import numpy as np
@@ -30,6 +31,27 @@ import pandas as pd
 # Below this absolute move we treat a close as "flat" rather than up/down, so a
 # forecast that lands essentially on spot is not scored as a directional call.
 _FLAT_EPS = 1e-9
+
+
+def _num(value):
+    """float(value), or None for None / blank / NaN / inf / non-numeric.
+
+    Predictions are read back from Sheets (or CSV) through pandas, which coerces
+    a blank cell to NaN — and NaN sails straight through an `is None` check
+    (`nan is not None`). If we then `float(nan)` and carry it forward, every
+    derived metric becomes NaN and the gspread write fails with
+    "Out of range float values are not JSON compliant", rejecting the whole row.
+    Normalizing missing/garbage numbers to None here lets the grader treat a
+    blank estimated_close or spot as genuinely missing (→ skip) instead of
+    silently producing an un-writable, all-NaN outcome.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 def _direction(value: float, reference: float) -> str:
@@ -51,19 +73,17 @@ def grade_prediction(pred: dict, actual_close: float, graded_at: str = None) -> 
     Raises ValueError if the prediction lacks the fields needed to grade it
     (no estimated_close or no spot) — the caller decides whether to skip.
     """
-    spot = pred.get("spot_at_pred", pred.get("spot_price"))
-    est = pred.get("estimated_close")
+    spot = _num(pred.get("spot_at_pred", pred.get("spot_price")))
+    est = _num(pred.get("estimated_close"))
     if spot is None or est is None:
         raise ValueError("prediction missing spot or estimated_close")
 
-    spot = float(spot)
-    est = float(est)
-    actual = float(actual_close)
+    actual = _num(actual_close)
+    if actual is None:
+        raise ValueError("realized close is not a finite number")
 
-    floor = pred.get("floor")
-    ceiling = pred.get("ceiling")
-    floor = float(floor) if floor not in (None, "") else None
-    ceiling = float(ceiling) if ceiling not in (None, "") else None
+    floor = _num(pred.get("floor"))
+    ceiling = _num(pred.get("ceiling"))
 
     close_abs_err = abs(actual - est)
     naive_abs_err = abs(actual - spot)

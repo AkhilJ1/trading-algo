@@ -62,7 +62,13 @@ def main(argv=None) -> int:
             print(f"  [{ticker} {expiry}] skipped — {e}")
             continue
 
-        logged = (log_pin_outcome(outcome) if sheets_ok else False) or log_pin_outcome_csv(outcome)
+        # When Sheets is the source of truth, require the Sheets write to
+        # succeed — do NOT silently fall back to an ephemeral runner-local CSV
+        # that is discarded when the job ends. The old `log_pin_outcome(...) or
+        # log_pin_outcome_csv(...)` masked Sheets failures (e.g. a NaN cell) as
+        # "graded", which left the scorecard empty while the job reported
+        # success. CSV is only the destination when Sheets is absent.
+        logged = log_pin_outcome(outcome) if sheets_ok else log_pin_outcome_csv(outcome)
         if logged:
             graded += 1
             print(

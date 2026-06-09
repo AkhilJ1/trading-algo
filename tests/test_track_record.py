@@ -90,6 +90,63 @@ def test_pct_error_is_relative_to_actual_close():
     assert abs(out["close_pct_err"] - (6.0 / 606.0 * 100.0)) < 1e-6
 
 
+# ── NaN / inf handling (the production bug: blank Sheets cells read back as NaN) ─
+#
+# pandas coerces a blank Predictions cell to NaN, and `nan is not None` is True,
+# so the old `is None` guard let NaN flow into the metrics — producing an
+# all-NaN outcome row that gspread then rejected ("Out of range float values are
+# not JSON compliant"), silently grading nothing. These pin the fix: a missing/
+# garbage number must read as genuinely missing → skip (ValueError), never as a
+# poisoned-but-passing forecast.
+
+def test_nan_estimated_close_is_treated_as_missing():
+    # Older daily predictions predate the estimated_close column → NaN on read.
+    out_pred = _pred(estimated_close=float("nan"))
+    try:
+        grade_prediction(out_pred, 604.0)
+        assert False, "expected ValueError for NaN estimated_close"
+    except ValueError:
+        pass
+
+
+def test_nan_spot_is_treated_as_missing():
+    try:
+        grade_prediction(_pred(spot_price=float("nan")), 604.0)
+        assert False, "expected ValueError for NaN spot"
+    except ValueError:
+        pass
+
+
+def test_inf_estimated_close_is_treated_as_missing():
+    try:
+        grade_prediction(_pred(estimated_close=float("inf")), 604.0)
+        assert False, "expected ValueError for non-finite estimated_close"
+    except ValueError:
+        pass
+
+
+def test_nan_actual_close_raises():
+    try:
+        grade_prediction(_pred(), actual_close=float("nan"))
+        assert False, "expected ValueError for NaN realized close"
+    except ValueError:
+        pass
+
+
+def test_nan_band_leaves_in_range_blank_but_still_grades_close():
+    # A NaN floor/ceiling (blank band cell) must not poison the row: in_range
+    # falls back to blank, but the close error is still scored.
+    out = grade_prediction(_pred(floor=float("nan"), ceiling=float("nan")),
+                           actual_close=604.0)
+    assert out["in_range"] == ""
+    assert out["close_abs_err"] == 1.0
+    # Every numeric field that *is* produced must be finite (JSON-writable).
+    import math as _m
+    for k, v in out.items():
+        if isinstance(v, float):
+            assert _m.isfinite(v), f"{k} is non-finite: {v}"
+
+
 # ── summarize_track_record ───────────────────────────────────────────────────
 
 def _graded(skill, in_range, dir_correct, close_err, naive_err):
