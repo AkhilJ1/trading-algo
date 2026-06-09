@@ -28,7 +28,21 @@ def fetch_stock_data(
             df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
         elif df.index.tz is not None:
             df.index = df.index.tz_localize(None)
-        return df
+        # The per-day cache key keeps yesterday's file from being reused today,
+        # but a file first written EARLIER today still holds today's *partial*
+        # bar — e.g. an intraday low (742) that the rest of the session blew
+        # through (real low 738, close 739). Serving that stale candle makes
+        # the chart's low never reach the true session low. If the newest
+        # cached bar is dated today, fall through and re-fetch so the current
+        # day's OHLC reflects the latest prints; completed prior days never
+        # change, so every other day still hits the cache instantly.
+        cache_has_today = (
+            isinstance(df.index, pd.DatetimeIndex)
+            and len(df) > 0
+            and df.index[-1].date() >= date.today()
+        )
+        if not cache_has_today:
+            return df
 
     df = get_provider().get_price_history(ticker, period=period, interval=interval)
     if df.empty:
