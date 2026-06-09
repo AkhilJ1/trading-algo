@@ -126,16 +126,30 @@ def test_no_expirations_no_cache_returns_empty(tmp_cache, monkeypatch):
 # ── expired-expiry filter (the Schwab silent-fallback bug) ───────────────────
 def test_drop_expired_filters_past_keeps_today_and_future():
     """Schwab lists the just-expired date first; only >= today should survive,
-    and today's still-live 0DTE must be kept for the pre-open recorder."""
-    from datetime import date, timedelta
-    today = date.today()
+    and today's still-live 0DTE must be kept for the pre-open recorder —
+    but ONLY until the close: a post-close run must roll to the next session
+    (a same-day "forecast" after the close is the estimated==actual bug)."""
+    from datetime import datetime, date, timedelta
+    # Pin the clock to a weekday so the test passes at any wall time:
+    # Tue 2026-06-09, once mid-session and once just after the 16:00 ET close.
+    intraday = datetime(2026, 6, 9, 11, 0)     # 11:00 ET — session live
+    post_close = datetime(2026, 6, 9, 16, 16)  # 16:16 ET — session closed
+    today = date(2026, 6, 9)
     past = (today - timedelta(days=3)).isoformat()
     tdy = today.isoformat()
     fut = (today + timedelta(days=5)).isoformat()
-    assert _drop_expired([past, tdy, fut]) == [tdy, fut]   # today's 0DTE survives
-    assert _drop_expired(["weird", fut]) == ["weird", fut]  # unparseable kept
-    assert _drop_expired([past]) == [past]                  # all-past: defensive no-op
-    assert _drop_expired([]) == []
+    # Intraday: today's 0DTE survives.
+    assert _drop_expired([past, tdy, fut], now_et=intraday) == [tdy, fut]
+    assert _drop_expired(["weird", fut], now_et=intraday) == ["weird", fut]  # unparseable kept
+    assert _drop_expired([past], now_et=intraday) == [past]   # all-past: defensive no-op
+    assert _drop_expired([], now_et=intraday) == []
+    # Post-close: today's 0DTE is over — only the future expiry survives.
+    assert _drop_expired([past, tdy, fut], now_et=post_close) == [fut]
+    # Saturday: the week's last expiry (Friday) is gone too.
+    saturday = datetime(2026, 6, 13, 10, 0)
+    fri = date(2026, 6, 12).isoformat()
+    nxt = date(2026, 6, 15).isoformat()
+    assert _drop_expired([fri, nxt], now_et=saturday) == [nxt]
 
 
 def test_fetch_skips_expired_first_expiry(tmp_cache, monkeypatch):

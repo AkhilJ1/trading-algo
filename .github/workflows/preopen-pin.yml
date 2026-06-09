@@ -1,24 +1,30 @@
 name: Pre-Open Dealer-Pin
 
 # Records SPY's pre-open 0DTE dealer-pin close forecast every market morning,
-# then grades it against the realized close that same evening — a fully
+# then grades it against the realized close just after the bell — a fully
 # autonomous, point-in-time-honest pre-open pin scorecard. No website button,
 # no local machine: everything runs in GitHub's cloud on a schedule.
 #
-# Two schedules, two jobs (gated on which cron fired so the right half runs):
-#   * 13:25 UTC Mon–Fri  → RECORD the pre-open pin (anchored on the live
-#     pre-market spot). 13:25 UTC is 09:25 ET in summer (EDT) and 08:25 ET in
-#     winter (EST) — comfortably before the 09:30 ET open year-round, while the
-#     overnight-settled option OI (max-pain + gamma) is already fixed.
-#   * 22:45 UTC Mon–Fri  → GRADE matured pins. Today's 0DTE expires at 16:00 ET
-#     (20:00 UTC EDT / 21:00 UTC EST); by 22:45 UTC the settled daily close is
-#     available, so the morning pin gets scored against reality.
-# GitHub cron is always UTC.
+# Target times are PACIFIC (the user's clock):
+#   * 6:25am PT Mon–Fri → RECORD the pre-open pin: estimate today's closing
+#     print, anchored on the live pre-market spot, against today's 0DTE whose
+#     overnight-settled OI (max-pain + gamma) is already fixed. 6:25am PT is
+#     five minutes before the 6:30am PT (9:30 ET) open.
+#   * 1:16pm PT Mon–Fri → GRADE the morning estimate against the session's
+#     actual closing print (the close is 1:00pm PT / 16:00 ET).
+#
+# GitHub cron is UTC-only and ignores DST, so each Pacific time needs a PAIR
+# of crons (PDT = UTC-7, PST = UTC-8). Both fire year-round; a tiny gate job
+# checks the actual Pacific hour and lets only the correct one through. The
+# gate also rejects a badly delayed run (e.g. the recorder arriving mid-
+# session would not be a pre-open forecast any more).
 
 on:
   schedule:
-    - cron: "25 13 * * 1-5"   # pre-open: record the pin
-    - cron: "45 22 * * 1-5"   # after close: grade the pin
+    - cron: "25 13 * * 1-5"   # record — 6:25am PDT (Mar–Nov)
+    - cron: "25 14 * * 1-5"   # record — 6:25am PST (Nov–Mar)
+    - cron: "16 20 * * 1-5"   # grade  — 1:16pm PDT (Mar–Nov)
+    - cron: "16 21 * * 1-5"   # grade  — 1:16pm PST (Nov–Mar)
   workflow_dispatch:
     inputs:
       mode:
@@ -34,11 +40,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  record:
-    # Fires on the morning cron, or a manual dispatch with mode=record.
+  record-gate:
+    # Fires on either morning cron, or a manual dispatch with mode=record.
     if: >-
       github.event.schedule == '25 13 * * 1-5' ||
+      github.event.schedule == '25 14 * * 1-5' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'record')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.g.outputs.run }}
+    steps:
+      - name: Check it is actually ~6:25am Pacific
+        id: g
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          H=$(TZ=America/Los_Angeles date +%H)
+          echo "Pacific time now: $(TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M %Z')"
+          if [ "$H" = "06" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Not the 6am PT hour — wrong DST cron of the pair (or a long-delayed run that would no longer be pre-open). Skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  record:
+    needs: record-gate
+    if: needs.record-gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -99,11 +129,38 @@ jobs:
         if: always()
         run: rm -f "${{ github.workspace }}/gcp_sa.json" schwab_token.json
 
-  grade:
-    # Fires on the evening cron, or a manual dispatch with mode=grade.
+  grade-gate:
+    # Fires on either post-close cron, or a manual dispatch with mode=grade.
     if: >-
-      github.event.schedule == '45 22 * * 1-5' ||
+      github.event.schedule == '16 20 * * 1-5' ||
+      github.event.schedule == '16 21 * * 1-5' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'grade')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.g.outputs.run }}
+    steps:
+      - name: Check the session has closed (Pacific afternoon)
+        id: g
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          H=$(TZ=America/Los_Angeles date +%H)
+          echo "Pacific time now: $(TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M %Z')"
+          # 13 = on time (1:16pm PT); 14/15 tolerate GitHub cron delay — the
+          # close has settled either way. Rejects the wrong DST cron of the
+          # pair (12:16pm PT, mid-session). A fully skipped day self-heals:
+          # grading is idempotent and the next run picks up anything pending.
+          case "$H" in
+            13|14|15) echo "run=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Market not yet closed in PT (wrong DST cron of the pair). Skipping."
+               echo "run=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  grade:
+    needs: grade-gate
+    if: needs.grade-gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

@@ -19,8 +19,23 @@ from config import (
     GSHEET_CALIBRATION_SHEET,
     GSHEET_PIN_FORECASTS_SHEET,
     GSHEET_PIN_OUTCOMES_SHEET,
+    GSHEET_LEVELS_SHEET,
     SIGNAL_WEIGHTS,
 )
+
+# All ledger timestamps are recorded in US Pacific time (the user's clock).
+# They used to be naive UTC, which made a 6:25am PT pre-open run read as a
+# mid-day mystery and left the dashboard showing dates with a 00:00:00 time.
+try:
+    from zoneinfo import ZoneInfo
+    _PT = ZoneInfo("America/Los_Angeles")
+except Exception:  # pragma: no cover - zoneinfo ships with the py3.9+ runtime
+    _PT = None
+
+
+def pacific_now() -> datetime:
+    """Current time in US Pacific (naive UTC if zoneinfo is unavailable)."""
+    return datetime.now(_PT) if _PT is not None else datetime.utcnow()
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -59,6 +74,11 @@ OUTCOME_HEADERS = [
     "actual_close", "close_abs_err", "close_pct_err", "in_range",
     "dir_predicted", "dir_actual", "dir_correct",
     "naive_abs_err", "skill",
+    # Appended (backward compatible — old rows read blank): the Pacific-time
+    # moment the FORECAST was recorded, copied from the prediction row so the
+    # scorecard can show when the call was actually made (e.g. 06:25 pre-open)
+    # instead of a bare date that renders as 00:00:00.
+    "pred_time",
 ]
 # Periodic, point-in-time-honest calibration snapshot of the evidence-based
 # range engine (range_calibration.py): how often each confidence band actually
@@ -128,9 +148,14 @@ def _ensure_sheet(spreadsheet, title, headers):
     import gspread
     try:
         ws = spreadsheet.worksheet(title)
-        # Check if headers match; update row 1 if schema changed
+        # Check if headers match; update row 1 if schema changed. Grow the
+        # grid first when columns were appended to the schema — sheets created
+        # with cols=len(old_headers) reject writes past their last column
+        # ("exceeds grid limits") instead of auto-expanding.
         existing = ws.row_values(1)
         if existing != headers:
+            if len(headers) > ws.col_count:
+                ws.add_cols(len(headers) - ws.col_count)
             ws.update("A1", [headers], value_input_option="RAW")
     except gspread.exceptions.WorksheetNotFound:
         ws = spreadsheet.add_worksheet(title=title, rows=1000, cols=len(headers))
@@ -187,7 +212,7 @@ def _prediction_row(
     spot_source="", chain_source="",
 ):
     """Build a Predictions row in PREDICTION_HEADERS order (shared by sheet/CSV)."""
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = pacific_now().strftime("%Y-%m-%d %H:%M:%S")
     return _json_safe([
         date_str, now, ticker, _num_or_blank(spot_price),
         _num_or_blank(floor), _num_or_blank(ceiling),
@@ -535,3 +560,88 @@ def read_pin_outcomes() -> pd.DataFrame:
 def read_pin_outcomes_csv() -> pd.DataFrame:
     """Fallback: read graded pin outcomes from data/pin_outcomes.csv."""
     return read_outcomes_csv(path_name='pin_outcomes.csv')
+
+
+# ── Levels history (floor/ceiling per analysis run) ───────────────────────
+# Append-only: one row per analysis run (the scheduled recorders and every
+# dashboard Analyze). The chart reads this back to draw EACH run's floor and
+# ceiling as its own line, so the levels visibly migrate through the day
+# instead of the latest run silently replacing the previous lines.
+
+LEVELS_HEADERS = [
+    "date", "timestamp", "ticker", "spot",
+    "floor", "ceiling", "floor2", "ceiling2",
+    "est_close", "source",
+]
+
+
+def _levels_row(ticker, spot, floor, ceiling,
+                floor2=None, ceiling2=None, est_close=None, source=""):
+    now = pacific_now()
+    return _json_safe([
+        now.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d %H:%M:%S"),
+        str(ticker).upper(), _num_or_blank(spot),
+        _num_or_blank(floor), _num_or_blank(ceiling),
+        _num_or_blank(floor2), _num_or_blank(ceiling2),
+        _num_or_blank(est_close), source or "",
+    ])
+
+
+def log_levels_snapshot(ticker, spot, floor, ceiling,
+                        floor2=None, ceiling2=None, est_close=None,
+                        source="") -> bool:
+    """Append one levels row to the LevelsHistory sheet. Returns True on success."""
+    try:
+        ss = get_spreadsheet()
+        ws = _ensure_sheet(ss, GSHEET_LEVELS_SHEET, LEVELS_HEADERS)
+        ws.append_row(
+            _levels_row(ticker, spot, floor, ceiling, floor2, ceiling2,
+                        est_close, source),
+            value_input_option="RAW",
+        )
+        return True
+    except Exception as e:
+        print(f"[sheets_logger] Error logging levels snapshot: {e}")
+        return False
+
+
+def log_levels_snapshot_csv(ticker, spot, floor, ceiling,
+                            floor2=None, ceiling2=None, est_close=None,
+                            source="", path_name="levels_history.csv") -> bool:
+    """Fallback: append one levels row to data/levels_history.csv."""
+    row = _levels_row(ticker, spot, floor, ceiling, floor2, ceiling2,
+                      est_close, source)
+    return _append_csv(_data_path(path_name), LEVELS_HEADERS, row)
+
+
+def _coerce_levels(df: pd.DataFrame) -> pd.DataFrame:
+    df["timestamp"] = pd.to_datetime(df.get("timestamp"), errors="coerce")
+    for col in ["spot", "floor", "ceiling", "floor2", "ceiling2", "est_close"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def read_levels_history() -> pd.DataFrame:
+    """Read the levels history from the sheet (or local CSV when absent)."""
+    try:
+        ss = get_spreadsheet()
+        ws = _ensure_sheet(ss, GSHEET_LEVELS_SHEET, LEVELS_HEADERS)
+        data = ws.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=LEVELS_HEADERS)
+        return _coerce_levels(pd.DataFrame(data))
+    except Exception as e:
+        print(f"[sheets_logger] Error reading levels history: {e}")
+        return read_levels_history_csv()
+
+
+def read_levels_history_csv(path_name="levels_history.csv") -> pd.DataFrame:
+    """Fallback: read the levels history from data/levels_history.csv."""
+    path = _data_path(path_name)
+    if os.path.exists(path):
+        try:
+            return _coerce_levels(pd.read_csv(path))
+        except Exception:
+            pass
+    return pd.DataFrame(columns=LEVELS_HEADERS)

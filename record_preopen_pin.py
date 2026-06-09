@@ -37,7 +37,6 @@ Usage:
 """
 
 import sys
-from datetime import datetime
 
 from strategies.fractal_options import compute_composite_analysis
 from options_fetcher import fetch_live_spot
@@ -45,6 +44,9 @@ from sheets_logger import (
     is_sheets_available,
     log_pin_forecast,
     log_pin_forecast_csv,
+    log_levels_snapshot,
+    log_levels_snapshot_csv,
+    pacific_now,
 )
 
 DEFAULT_TICKERS = ["SPY"]
@@ -153,6 +155,21 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
     if not logged:
         logged = log_pin_forecast_csv(**kwargs)
 
+    # One levels-history row per scheduled run, so the chart can show this
+    # run's floor/ceiling as its own line alongside the intraday ones.
+    try:
+        _r2 = (result.get("ranges") or {}).get("2sigma", {}) or {}
+        _lvl_kwargs = dict(
+            ticker=ticker, spot=result.get("spot_price"),
+            floor=result.get("floor"), ceiling=result.get("ceiling"),
+            floor2=_r2.get("floor"), ceiling2=_r2.get("ceiling"),
+            est_close=kwargs["estimated_close"], source="pre_open",
+        )
+        if not (sheets_ok and log_levels_snapshot(**_lvl_kwargs)):
+            log_levels_snapshot_csv(**_lvl_kwargs)
+    except Exception as e:
+        print(f"  [{ticker}] levels snapshot failed ({e}) — forecast still recorded")
+
     dest = "Google Sheets" if (sheets_ok and logged) else "local CSV"
     spot_src = result.get("spot_source", "daily_close")
     est = kwargs["estimated_close"]
@@ -168,7 +185,7 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
 
 def main(tickers):
     sheets_ok = is_sheets_available()
-    print(f"\n  PRE-OPEN PIN RECORDER — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"\n  PRE-OPEN PIN RECORDER — {pacific_now().strftime('%Y-%m-%d %H:%M %Z')}")
     print(f"  Destination: {'Google Sheets' if sheets_ok else 'local CSV (no Sheets creds)'}")
     print(f"  Recording {len(tickers)} ticker(s): {', '.join(tickers)}\n")
 

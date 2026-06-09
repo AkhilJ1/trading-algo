@@ -144,6 +144,10 @@ GSHEET_CALIBRATION_SHEET = "Calibration"  # periodic range-engine calibration sn
 # writes a forecast row; the evening grader fills in the realized close.
 GSHEET_PIN_FORECASTS_SHEET = "PinForecasts"
 GSHEET_PIN_OUTCOMES_SHEET = "PinOutcomes"
+# Append-only intraday floor/ceiling history: one row per analysis run (scheduled
+# recorders + every dashboard Analyze), so the chart can draw each run's levels
+# as its own line and the floor/ceiling migration is visible through the day.
+GSHEET_LEVELS_SHEET = "LevelsHistory"
 
 # ── Track-Record Grading ─────────────────────────────────────────────────
 # A dealer-pin close forecast is only "skillful" if it beats the naive

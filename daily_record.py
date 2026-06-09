@@ -18,13 +18,17 @@ Usage:
 """
 
 import sys
-from datetime import datetime
 
 from strategies.fractal_options import compute_composite_analysis
+from options_fetcher import fetch_live_spot
+from track_record import prediction_is_post_close
 from sheets_logger import (
     is_sheets_available,
     log_prediction,
     log_prediction_csv,
+    log_levels_snapshot,
+    log_levels_snapshot_csv,
+    pacific_now,
 )
 
 DEFAULT_TICKERS = ["SPY"]
@@ -69,10 +73,28 @@ def _pin_close_fields(result: dict):
 def record_ticker(ticker: str, sheets_ok: bool) -> bool:
     """Run the analysis for one ticker and log a single prediction row."""
     ticker = ticker.upper()
-    result = compute_composite_analysis(ticker)
+    # Post-close, the daily bar may not have settled into the feed yet — anchor
+    # on a live (post-market-aware) quote so the overnight forecast starts from
+    # where the market actually is, mirroring the pre-open recorder.
+    live_spot = fetch_live_spot(ticker)
+    result = compute_composite_analysis(ticker, spot_override=live_spot)
     if not result or "error" in result:
         err = result.get("error", "no result") if result else "no result"
         print(f"  [{ticker}] skipped — {err}")
+        return False
+
+    # Never record a "forecast" for an expiry whose session has already closed:
+    # its outcome is known, so grading it would only ever reproduce the
+    # estimated == actual rows this guard exists to kill. With the expired-0DTE
+    # drop in options_fetcher this should not trigger; it is belt-and-suspenders.
+    if prediction_is_post_close({
+        "expiry": result.get("expiry", ""),
+        "pred_time": result.get("timestamp", ""),
+    }):
+        print(
+            f"  [{ticker}] skipped — expiry {result.get('expiry')} already "
+            "closed at recording time (a post-close same-day row is not a forecast)"
+        )
         return False
 
     vix_val, regime = _fetch_vix()
@@ -110,6 +132,21 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
     if not logged:
         logged = log_prediction_csv(**kwargs)
 
+    # One levels-history row per scheduled run, so the chart can show this
+    # run's floor/ceiling as its own line alongside the intraday ones.
+    try:
+        _r2 = (result.get("ranges") or {}).get("2sigma", {}) or {}
+        _lvl_kwargs = dict(
+            ticker=ticker, spot=result.get("spot_price"),
+            floor=result.get("floor"), ceiling=result.get("ceiling"),
+            floor2=_r2.get("floor"), ceiling2=_r2.get("ceiling"),
+            est_close=est_close, source="post_close",
+        )
+        if not (sheets_ok and log_levels_snapshot(**_lvl_kwargs)):
+            log_levels_snapshot_csv(**_lvl_kwargs)
+    except Exception as e:
+        print(f"  [{ticker}] levels snapshot failed ({e}) — prediction still recorded")
+
     dest = "Google Sheets" if (sheets_ok and logged) else "local CSV"
     est_str = f"  est-close ${est_close:.2f}" if est_close is not None else ""
     print(
@@ -123,7 +160,7 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
 
 def main(tickers):
     sheets_ok = is_sheets_available()
-    print(f"\n  DAILY RECORDER — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"\n  DAILY RECORDER — {pacific_now().strftime('%Y-%m-%d %H:%M %Z')}")
     print(f"  Destination: {'Google Sheets' if sheets_ok else 'local CSV (no Sheets creds)'}")
     print(f"  Recording {len(tickers)} ticker(s): {', '.join(tickers)}\n")
 
