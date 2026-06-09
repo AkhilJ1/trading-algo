@@ -270,8 +270,26 @@ def log_weight_change(weight_name, old_value, new_value, reason) -> bool:
         return False
 
 
+def _dedupe_latest_predictions(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only the latest prediction per (day, ticker, EXPIRY).
+
+    Expiry must be part of the identity. With (date, ticker) alone, the 1:16pm
+    recorder's new overnight row (expiry = next session) silently SHADOWED the
+    previous evening's still-ungraded forecast for today's expiry — same date
+    key, later timestamp — so the matured forecast vanished from the grader's
+    view and the dealer-pin track record never accumulated a single legit row.
+    Outcomes are keyed by (pred_date, ticker, expiry); reads must match.
+    """
+    if "timestamp" in df.columns and not df["timestamp"].isna().all():
+        subset = ["date", "ticker"] + (["expiry"] if "expiry" in df.columns else [])
+        df = df.sort_values("timestamp").drop_duplicates(
+            subset=subset, keep="last"
+        ).reset_index(drop=True)
+    return df
+
+
 def read_predictions(sheet=GSHEET_PREDICTIONS_SHEET) -> pd.DataFrame:
-    """Read all predictions from `sheet`. Deduplicates to latest per ticker per day."""
+    """Read all predictions from `sheet`. Deduplicates to latest per ticker per day per expiry."""
     try:
         ss = get_spreadsheet()
         ws = _ensure_sheet(ss, sheet, PREDICTION_HEADERS)
@@ -286,12 +304,7 @@ def read_predictions(sheet=GSHEET_PREDICTIONS_SHEET) -> pd.DataFrame:
                     "gex_net", "estimated_close", "pin_target", "max_pain"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-        # Keep only the latest prediction per ticker per day
-        if "timestamp" in df.columns and not df["timestamp"].isna().all():
-            df = df.sort_values("timestamp").drop_duplicates(
-                subset=["date", "ticker"], keep="last"
-            ).reset_index(drop=True)
-        return df
+        return _dedupe_latest_predictions(df)
     except Exception as e:
         print(f"[sheets_logger] Error reading predictions: {e}")
         return pd.DataFrame(columns=PREDICTION_HEADERS)
