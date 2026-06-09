@@ -4,13 +4,21 @@ name: Daily Prediction Recorder
 # the dashboard reads from, then grades any earlier forecasts whose expiry day
 # has since closed — building a scored, point-in-time-honest track record.
 # Runs in GitHub's cloud, independent of any local machine being awake.
+#
+# Runs at 1:16pm PACIFIC, right after the 1:00pm PT (16:00 ET) close. Post-
+# close, options_fetcher rolls past today's expired 0DTE, so the dealer-pin
+# row recorded here targets the NEXT session's expiry — a genuine overnight
+# forecast, graded by this same job the following afternoon. (The old 22:30
+# UTC run picked today's already-closed 0DTE, anchored on the settled close —
+# which is how estimated_close == actual_close rows got into the scorecard.)
+#
+# GitHub cron is UTC-only and ignores DST, so 1:16pm PT needs a PAIR of crons
+# (PDT = UTC-7, PST = UTC-8); a gate job lets only the correct one through.
 
 on:
   schedule:
-    # 22:30 UTC, Mon-Fri. This is after the US market close year-round
-    # (16:00 ET = 20:00 UTC in summer / 21:00 UTC in winter), so it is safe
-    # across daylight-saving changes. GitHub cron is always UTC.
-    - cron: "30 22 * * 1-5"
+    - cron: "16 20 * * 1-5"   # 1:16pm PDT (Mar–Nov)
+    - cron: "16 21 * * 1-5"   # 1:16pm PST (Nov–Mar)
   workflow_dispatch: {}   # allow manual runs from the Actions tab
 
 permissions:
@@ -21,7 +29,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.g.outputs.run }}
+    steps:
+      - name: Check the session has closed (Pacific afternoon)
+        id: g
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          H=$(TZ=America/Los_Angeles date +%H)
+          echo "Pacific time now: $(TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M %Z')"
+          # 13 = on time (1:16pm PT); 14/15 tolerate GitHub cron delay.
+          # Rejects the wrong DST cron of the pair (12:16pm PT, mid-session).
+          case "$H" in
+            13|14|15) echo "run=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Market not yet closed in PT (wrong DST cron of the pair). Skipping."
+               echo "run=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
   record:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

@@ -1785,6 +1785,16 @@ elif page == '🔬 Fractal & Options':
     except Exception:
         active_weights = dict(SIGNAL_WEIGHTS)
 
+    # Levels history, cached so the Yellow Box 30s auto-refresh fragment does
+    # not hammer the Sheets API; cleared explicitly when a new run logs a row.
+    @st.cache_data(ttl=120, show_spinner=False)
+    def _read_levels_cached():
+        from sheets_logger import read_levels_history, read_levels_history_csv
+        df = read_levels_history()
+        if df is None or df.empty:
+            df = read_levels_history_csv()
+        return df
+
     # ── Run analysis ───────────────────────────────────────────────────────
     # Re-run when the user clicks Analyze OR changes the expiry, so scrolling
     # through expiries refreshes the chain (GEX, walls, max-pain, dealer pin)
@@ -1806,6 +1816,33 @@ elif page == '🔬 Fractal & Options':
                 spot_override=_live_spot,
             )
         st.session_state.fo_result = result
+
+        # Every analysis run appends its floor/ceiling to the LevelsHistory
+        # ledger, so the Yellow Box chart can draw each run's levels as its own
+        # line and the migration through the day stays visible (instead of each
+        # run silently replacing the previous lines). Best-effort: a logging
+        # hiccup must never block the analysis itself.
+        if result and 'error' not in result:
+            try:
+                from sheets_logger import (
+                    log_levels_snapshot, log_levels_snapshot_csv,
+                )
+                _lh_r2 = (result.get('ranges') or {}).get('2sigma', {}) or {}
+                _lh_est = result.get('estimated_close')
+                _lh_kwargs = dict(
+                    ticker=result.get('ticker', fo_ticker.strip().upper()),
+                    spot=result.get('spot_price'),
+                    floor=result.get('floor'), ceiling=result.get('ceiling'),
+                    floor2=_lh_r2.get('floor'), ceiling2=_lh_r2.get('ceiling'),
+                    est_close=(_lh_est.get('estimated_close')
+                               if isinstance(_lh_est, dict) else None),
+                    source='dashboard',
+                )
+                if not (_sheets_ok and log_levels_snapshot(**_lh_kwargs)):
+                    log_levels_snapshot_csv(**_lh_kwargs)
+                _read_levels_cached.clear()   # new line should appear right away
+            except Exception:
+                pass
 
     result = st.session_state.fo_result
     if result is None:
@@ -2422,6 +2459,67 @@ elif page == '🔬 Fractal & Options':
                                  annotation_text=f"Pivot {_am_fmt(_am_pivot_disp)}",
                                  annotation_position='right', annotation_font_color='#b0bec5')
 
+            # ── Floor/ceiling history: one stepped line per analysis run ──
+            # Every run (6:25am recorder, 1:16pm recorder, each dashboard
+            # Analyze) appends its levels to LevelsHistory; here we draw that
+            # path so the floor/ceiling visibly migrate through the day instead
+            # of each run replacing the previous lines. The bold hlines above
+            # remain the CURRENT levels; these faded steps are where they were.
+            # Fully best-effort: a malformed ledger must never blank the chart.
+            try:
+                _lh = _read_levels_cached() if _spec['intraday'] else None
+                if _lh is not None and not _lh.empty and 'ticker' in _lh.columns:
+                    _lh = _lh[
+                        (_lh['ticker'].astype(str).str.upper()
+                         == str(result.get('ticker', '')).upper())
+                        & _lh['timestamp'].notna()
+                    ].copy()
+                    if not _lh.empty:
+                        # Ledger stamps are Pacific; the intraday bars plot in
+                        # naive Eastern — shift so the steps land on the axis.
+                        try:
+                            _lh['ts_et'] = (
+                                _lh['timestamp']
+                                .dt.tz_localize('America/Los_Angeles',
+                                                ambiguous='NaT',
+                                                nonexistent='NaT')
+                                .dt.tz_convert('America/New_York')
+                                .dt.tz_localize(None)
+                            )
+                        except Exception:
+                            _lh['ts_et'] = _lh['timestamp']
+                        _lh = _lh.dropna(subset=['ts_et']).sort_values('ts_et')
+                        # Clip to the plotted window so 1D shows today's runs
+                        # and 1W the week's.
+                        _x_lo, _x_hi = _amdf.index.min(), _amdf.index.max()
+                        _lh = _lh[(_lh['ts_et'] >= _x_lo - pd.Timedelta(hours=1))
+                                  & (_lh['ts_et'] <= _x_hi + pd.Timedelta(hours=1))]
+                    if not _lh.empty:
+                        _x_end = _amdf.index.max()
+                        for _col, _color, _label in (
+                            ('floor', 'rgba(38,166,154,0.55)', 'Floor @ run'),
+                            ('ceiling', 'rgba(239,83,80,0.55)', 'Ceiling @ run'),
+                        ):
+                            _pts = _lh.dropna(subset=[_col])
+                            if _pts.empty:
+                                continue
+                            _xs = [*_pts['ts_et'], _x_end]
+                            _ys = [_am_ax(v) for v in _pts[_col]]
+                            _ys = [*_ys, _ys[-1]]
+                            fig_am.add_trace(go.Scatter(
+                                x=_xs, y=_ys, mode='lines+markers',
+                                name=_label, showlegend=False,
+                                line=dict(color=_color, width=1.2,
+                                          dash='dot', shape='hv'),
+                                marker=dict(size=5, symbol='diamond',
+                                            color=_color),
+                                hovertemplate=(_label
+                                               + ' %{y:.2f}<br>%{x|%H:%M} ET'
+                                               '<extra></extra>'),
+                            ))
+            except Exception:
+                pass
+
             # ── Option walls (proxy units) as secondary objective ticks ────
             if _am_in_band(_am_cwall):
                 _cw_lbl = _am_cwall * _am_ratio if _am_ratio > 1 else _am_cwall
@@ -3031,12 +3129,17 @@ elif page == '🔬 Fractal & Options':
         # grows one trading day at a time.
         st.subheader('Dealer-Pin Close — Track Record')
         st.caption(
-            'Each matured forecast is scored against the realized close AND against '
-            'the naive "price just stays at spot" null model. Skill = naive error − '
-            'model error; positive means the dealer-pin estimate added value.'
+            'Recorded after the close (1:16pm PT) for the NEXT session\'s expiry — '
+            'an overnight dealer-pin forecast. Each matured forecast is scored '
+            'against the realized close AND against the naive "price just stays at '
+            'spot" null model. Skill = naive error − model error; positive means '
+            'the dealer-pin estimate added value.'
         )
         try:
-            from track_record import summarize_track_record, join_predictions_outcomes
+            from track_record import (
+                summarize_track_record, join_predictions_outcomes,
+                drop_degenerate_outcomes,
+            )
 
             out_df = read_outcomes() if _sheets_ok else read_outcomes_csv()
             tkr = result['ticker']
@@ -3044,6 +3147,20 @@ elif page == '🔬 Fractal & Options':
                 tkr_out = out_df[out_df['ticker'].astype(str).str.upper() == tkr.upper()].copy()
             else:
                 tkr_out = out_df if out_df is not None else pd.DataFrame()
+
+            # Drop legacy self-graded rows: "forecasts" recorded AFTER their own
+            # expiry's close, where spot == actual by construction (the
+            # estimated == actual artifact). The recorders/graders can no longer
+            # produce these, but the old rows still live in the Outcomes ledger.
+            n_before = len(tkr_out) if tkr_out is not None else 0
+            tkr_out = drop_degenerate_outcomes(tkr_out)
+            n_dropped = n_before - (len(tkr_out) if tkr_out is not None else 0)
+            if n_dropped:
+                st.caption(
+                    f'ℹ️ {n_dropped} legacy row(s) excluded: they were recorded after '
+                    'their own expiry had closed (estimated = actual by construction), '
+                    'so they are not forecasts and are not scored.'
+                )
 
             summ = summarize_track_record(tkr_out)
             if summ['n_graded'] == 0:
@@ -3110,14 +3227,28 @@ elif page == '🔬 Fractal & Options':
 
                 with st.expander(f'Graded forecasts ({summ["n_graded"]})'):
                     show = tkr_out.copy()
-                    show['pred_date'] = pd.to_datetime(show['pred_date'], errors='coerce')
-                    show = show.sort_values('pred_date', ascending=False)
+                    show = show.sort_values(
+                        'pred_date', ascending=False,
+                        key=lambda s: pd.to_datetime(s, errors='coerce'),
+                    )
+                    # Render dates as plain dates and the forecast's recording
+                    # time as an actual clock time (Pacific) — a datetime-cast
+                    # date column shows a meaningless 00:00:00.
+                    show['pred_date'] = show['pred_date'].astype(str).str[:10]
+                    if 'pred_time' in show.columns:
+                        _pt = pd.to_datetime(show['pred_time'], errors='coerce')
+                        show['pred_time'] = _pt.dt.strftime('%H:%M').fillna('—')
                     cols = [c for c in [
-                        'pred_date', 'expiry', 'spot_at_pred', 'estimated_close',
-                        'actual_close', 'close_abs_err', 'naive_abs_err', 'skill',
-                        'in_range', 'dir_correct',
+                        'pred_date', 'pred_time', 'expiry', 'spot_at_pred',
+                        'estimated_close', 'actual_close', 'close_abs_err',
+                        'naive_abs_err', 'skill', 'in_range', 'dir_correct',
                     ] if c in show.columns]
-                    st.dataframe(show[cols].head(60), width='stretch')
+                    st.dataframe(
+                        show[cols].rename(columns={
+                            'pred_date': 'Pred Date', 'pred_time': 'Pred Time (PT)',
+                        }).head(60),
+                        width='stretch', hide_index=True,
+                    )
         except Exception as e:
             st.warning(f'Could not load track record: {e}')
 
@@ -3131,9 +3262,10 @@ elif page == '🔬 Fractal & Options':
         st.markdown('---')
         st.subheader('Pre-Open Pin — Track Record')
         st.caption(
-            'A separate forecast logged before the open (~9:15 ET) and graded '
-            'against that day\'s realized close. Scored the same way: skill = '
-            'naive error − model error, so positive means the pre-open pin added value.'
+            'A separate forecast of the closing print, logged pre-market at '
+            '6:25am PT and graded against the realized close at 1:16pm PT the '
+            'same day. Scored the same way: skill = naive error − model error, '
+            'so positive means the pre-open pin added value.'
         )
         try:
             from track_record import (
@@ -3166,9 +3298,9 @@ elif page == '🔬 Fractal & Options':
             if fc.empty:
                 st.info(
                     f'No pre-open pin forecasts recorded for {_tkr} yet. The '
-                    'automation logs one before each open (~9:15 ET); it appears '
-                    'here as soon as it is recorded, then earns a grade after '
-                    'that day\'s close.'
+                    'automation logs one pre-market at 6:25am PT; it appears '
+                    'here as soon as it is recorded, then earns a grade at '
+                    '1:16pm PT after that day\'s close.'
                 )
             else:
                 # Left-join each recorded forecast to its grade (blank if still
@@ -3241,16 +3373,27 @@ elif page == '🔬 Fractal & Options':
                 # with grade columns where a session has matured.
                 show = joined.copy()
                 if 'date' in show.columns:
-                    show['date'] = pd.to_datetime(show['date'], errors='coerce')
-                    show = show.sort_values('date', ascending=False)
+                    show = show.sort_values(
+                        'date', ascending=False,
+                        key=lambda s: pd.to_datetime(s, errors='coerce'),
+                    )
+                    # Plain date — casting to datetime renders a bogus 00:00:00.
+                    show['date'] = show['date'].astype(str).str[:10]
+                # The ledger's `timestamp` is the actual recording moment
+                # (Pacific since 2026-06-10; UTC before). Surface it as the pred
+                # time so a 6:25am pre-open run reads as 06:25, not midnight.
+                if 'timestamp' in show.columns:
+                    _ts = pd.to_datetime(show['timestamp'], errors='coerce')
+                    show['pred_time'] = _ts.dt.strftime('%H:%M').fillna('—')
                 disp_cols = [c for c in [
-                    'date', 'expiry', 'status', 'spot_price', 'estimated_close',
-                    'pin_target', 'max_pain', 'floor', 'ceiling',
+                    'date', 'pred_time', 'expiry', 'status', 'spot_price',
+                    'estimated_close', 'pin_target', 'max_pain', 'floor', 'ceiling',
                     'actual_close', 'close_abs_err', 'naive_abs_err', 'skill',
                     'in_range', 'dir_correct',
                 ] if c in show.columns]
                 rename = {
-                    'date': 'Pred Date', 'expiry': 'Expiry', 'status': 'Status',
+                    'date': 'Pred Date', 'pred_time': 'Pred Time (PT)',
+                    'expiry': 'Expiry', 'status': 'Status',
                     'spot_price': 'Spot', 'estimated_close': 'Est Close',
                     'pin_target': 'Pin Target', 'max_pain': 'Max Pain',
                     'floor': 'Floor', 'ceiling': 'Ceiling', 'actual_close': 'Actual',

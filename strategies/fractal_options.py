@@ -32,6 +32,7 @@ from config import (
     NEURAL_BRACKET_MIN_STRENGTH,
 )
 from options_fetcher import fetch_options_chain, fetch_expiration_dates
+from sheets_logger import pacific_now
 from strategies.fractal_indicators import (
     add_williams_fractals,
     get_recent_fractal_levels,
@@ -1063,7 +1064,9 @@ def compute_composite_analysis(
         'price_ratio': round(price_ratio, 4),
         # 'daily_close' (normal) or 'live_override' (pre-open live spot anchor).
         'spot_source': spot_source,
-        'timestamp': date.today().isoformat(),
+        # Full Pacific-time run stamp (was a bare date, which downstream ledgers
+        # and the dashboard rendered as 00:00:00). [:10] still yields the date.
+        'timestamp': pacific_now().strftime('%Y-%m-%d %H:%M:%S'),
         'expiry': expiry_used,
         # Provenance from the data layer so the UI can show whether this is a
         # live snapshot or the last-known-good chain served after the close.

@@ -242,3 +242,93 @@ def test_join_keeps_pending_rows_and_merges_graded():
     row2 = merged[merged["date"] == "2026-06-02"].iloc[0]
     assert row1["actual_close"] == 604.0          # graded row carries the outcome
     assert pd.isna(row2["actual_close"])          # still-pending row stays blank
+
+
+# ── post-close degenerate-forecast guards (the estimated==actual bug) ────────
+# The after-close recorder used to log a "forecast" for the SAME day's already-
+# expired 0DTE, anchored on the settled close — the grader then scored it
+# against that very close (spot == actual, naive error exactly 0). These guards
+# make such rows unrecordable, ungradable, and invisible to the scorecard.
+
+from track_record import prediction_is_post_close, drop_degenerate_outcomes
+
+
+def test_post_close_same_day_prediction_is_flagged():
+    # Recorded 13:16 PT on its own expiry day — the close already printed.
+    p = _pred(expiry="2026-06-15", pred_time="2026-06-15 13:16:00")
+    assert prediction_is_post_close(p) is True
+
+
+def test_pre_close_same_day_prediction_is_not_flagged():
+    # The 6:25am PT pre-open pin records BEFORE the close — a real forecast.
+    p = _pred(expiry="2026-06-15", pred_time="2026-06-15 06:25:00")
+    assert prediction_is_post_close(p) is False
+
+
+def test_overnight_prediction_for_next_session_is_not_flagged():
+    # Recorded after Monday's close FOR Tuesday's expiry — a real forecast.
+    p = _pred(expiry="2026-06-16", pred_time="2026-06-15 13:16:00")
+    assert prediction_is_post_close(p) is False
+
+
+def test_prediction_after_expiry_day_is_flagged():
+    p = _pred(expiry="2026-06-15", pred_time="2026-06-16 09:00:00")
+    assert prediction_is_post_close(p) is True
+
+
+def test_legacy_utc_preopen_stamp_is_not_misread_as_post_close():
+    # Rows written before the 2026-06-10 cutover are naive UTC: 16:15 UTC is
+    # 09:15 PT (pre-open) — it must NOT be flagged as a 4:15pm post-close run.
+    p = _pred(expiry="2026-06-09", pred_time="2026-06-09 16:15:37")
+    assert prediction_is_post_close(p) is False
+
+
+def test_legacy_utc_after_close_stamp_is_still_flagged():
+    # 23:48 UTC on the expiry day = 16:48 PT — recorded after the close.
+    p = _pred(expiry="2026-06-08", pred_time="2026-06-08 23:48:37")
+    assert prediction_is_post_close(p) is True
+
+
+def test_missing_timestamp_is_not_flagged():
+    assert prediction_is_post_close(_pred(expiry="2026-06-15")) is False
+
+
+def test_drop_degenerate_outcomes_removes_self_graded_rows():
+    outs = pd.DataFrame([
+        # The real ledger rows that exposed the bug: spot == actual, naive 0.
+        {"pred_date": "2026-06-05", "ticker": "SPY", "expiry": "2026-06-05",
+         "spot_at_pred": 737.55, "estimated_close": 737.55,
+         "actual_close": 737.55, "naive_abs_err": 0.0},
+        # A legitimate overnight forecast — keep.
+        {"pred_date": "2026-06-08", "ticker": "SPY", "expiry": "2026-06-09",
+         "spot_at_pred": 739.22, "estimated_close": 739.91,
+         "actual_close": 737.55, "naive_abs_err": 1.67},
+    ])
+    kept = drop_degenerate_outcomes(outs)
+    assert len(kept) == 1
+    assert kept.iloc[0]["expiry"] == "2026-06-09"
+
+
+def test_drop_degenerate_keeps_same_day_row_with_pre_close_pred_time():
+    # A pre-open call where the close coincidentally landed exactly on spot is
+    # a legitimate (and perfect-naive) outcome — pred_time proves it.
+    outs = pd.DataFrame([{
+        "pred_date": "2026-06-12", "ticker": "SPY", "expiry": "2026-06-12",
+        "spot_at_pred": 740.0, "estimated_close": 741.0, "actual_close": 740.0,
+        "naive_abs_err": 0.0, "pred_time": "2026-06-12 06:25:00",
+    }])
+    assert len(drop_degenerate_outcomes(outs)) == 1
+
+
+def test_drop_degenerate_outcomes_safe_on_empty():
+    assert drop_degenerate_outcomes(pd.DataFrame()).empty
+
+
+def test_graded_outcome_carries_pred_time_and_pacific_graded_at():
+    out = grade_prediction(
+        _pred(expiry="2026-06-16", timestamp="2026-06-15 13:16:00"),
+        actual_close=604.0,
+    )
+    assert out["pred_time"] == "2026-06-15 13:16:00"
+    # graded_at is a parseable wall-clock stamp (Pacific by construction).
+    assert pd.to_datetime(out["graded_at"]) is not pd.NaT

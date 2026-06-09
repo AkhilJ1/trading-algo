@@ -124,7 +124,7 @@ def _chain_source(provider) -> str:
     return getattr(provider, 'name', DATA_PROVIDER)
 
 
-def _drop_expired(expiries: List[str]) -> List[str]:
+def _drop_expired(expiries: List[str], now_et: Optional[datetime] = None) -> List[str]:
     """Remove expirations that have already passed.
 
     Schwab's expiration list INCLUDES the most-recently-expired date and lists
@@ -135,9 +135,19 @@ def _drop_expired(expiries: List[str]) -> List[str]:
     yfinance instead of Schwab (proven via data_health probe: exps[0]=expired
     Friday → 0/0, nearest live expiry → 171/171 usable). Keeping only expiries
     >= today fixes the selection while preserving today's still-live 0DTE for
-    the 9:25am pre-open recorder. Unparseable entries are kept, and if filtering
-    would empty the list we return it unchanged (defensive)."""
-    today = date.today()
+    the pre-open recorder. Unparseable entries are kept, and if filtering
+    would empty the list we return it unchanged (defensive).
+
+    Today's 0DTE is only live UNTIL the 16:00 ET close. Keeping it afterwards
+    made every post-close run "forecast" an expiry whose closing print had
+    already happened, anchored on that very close — the degenerate
+    estimated_close == actual_close rows in the dealer-pin scorecard. Once the
+    session has closed, today's expiry is expired: post-close analyses roll to
+    the NEXT session, turning the after-close dealer pin into a genuine
+    overnight forecast."""
+    now = now_et or _now_et()
+    today = now.date()
+    today_session_closed = now.time() > _MARKET_CLOSE or now.weekday() >= 5
     kept = []
     for e in expiries:
         try:
@@ -145,7 +155,7 @@ def _drop_expired(expiries: List[str]) -> List[str]:
         except Exception:
             kept.append(e)   # unparseable — keep rather than silently drop
             continue
-        if d >= today:
+        if d > today or (d == today and not today_session_closed):
             kept.append(e)
     return kept or list(expiries)
 

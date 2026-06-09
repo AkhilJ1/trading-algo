@@ -22,7 +22,7 @@ import sys
 import pandas as pd
 
 from data_fetcher import fetch_stock_data
-from track_record import grade_prediction, pending_predictions
+from track_record import grade_prediction, pending_predictions, prediction_is_post_close
 from sheets_logger import (
     is_sheets_available,
     read_predictions, read_predictions_csv,
@@ -75,6 +75,12 @@ def main(argv=None) -> int:
         pred = p.to_dict()
         ticker = str(pred.get("ticker", "")).upper()
         expiry = pred.get("expiry", "")
+        if prediction_is_post_close(pred):
+            print(
+                f"  [{ticker} {expiry}] skipped — recorded after its expiry "
+                "session closed (outcome was already known; not a forecast)"
+            )
+            continue
         actual = _realized_close(ticker, expiry)
         if actual is None:
             print(f"  [{ticker} {expiry}] realized close not available yet — still pending")

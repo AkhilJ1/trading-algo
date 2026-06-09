@@ -23,14 +23,26 @@ in grade_predictions.py so this stays trivially testable.
 """
 
 import math
-from datetime import datetime
+from datetime import datetime, time as dtime
 
 import numpy as np
 import pandas as pd
 
+from sheets_logger import pacific_now, _PT
+
 # Below this absolute move we treat a close as "flat" rather than up/down, so a
 # forecast that lands essentially on spot is not scored as a directional call.
 _FLAT_EPS = 1e-9
+
+# US equity close in Pacific time. A forecast for expiry day D recorded at or
+# after D's close was made AFTER the outcome printed — it is not a forecast.
+_MARKET_CLOSE_PT = dtime(13, 0)
+
+# Ledger rows written before 2026-06-10 carry naive UTC timestamps (the loggers
+# used datetime.utcnow() back then); rows from that date on are Pacific. The
+# post-close guard converts pre-cutover stamps to Pacific so a legacy 16:15 UTC
+# (= 09:15 PT pre-open) forecast is not misread as a 4:15pm post-close one.
+_LEDGER_TZ_CUTOVER = pd.Timestamp("2026-06-10")
 
 
 def _num(value):
@@ -101,11 +113,18 @@ def grade_prediction(pred: dict, actual_close: float, graded_at: str = None) -> 
     if isinstance(pred_date, (datetime, pd.Timestamp)):
         pred_date = pred_date.strftime("%Y-%m-%d")
 
+    # Carry the forecast's own recording time (Pacific) into the outcome so the
+    # scorecard can show WHEN the call was made, not a date at 00:00:00.
+    pred_time = pred.get("pred_time", pred.get("timestamp", ""))
+    if isinstance(pred_time, (datetime, pd.Timestamp)):
+        pred_time = "" if pd.isna(pred_time) else pred_time.strftime("%Y-%m-%d %H:%M:%S")
+
     return {
         "pred_date": str(pred_date)[:10],
         "ticker": pred.get("ticker", ""),
         "expiry": pred.get("expiry", ""),
-        "graded_at": graded_at or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "graded_at": graded_at or pacific_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "pred_time": str(pred_time or ""),
         "spot_at_pred": round(spot, 2),
         "estimated_close": round(est, 2),
         "floor": round(floor, 2) if floor is not None else "",
@@ -136,6 +155,61 @@ def _naive_day(value) -> pd.Timestamp:
     if ts.tz is not None:
         ts = ts.tz_localize(None)
     return ts.normalize()
+
+
+def prediction_is_post_close(pred: dict) -> bool:
+    """
+    True when the forecast was recorded AT/AFTER the close of its own expiry
+    session — i.e. after the outcome it "predicts" had already printed.
+
+    This is the logic error that produced estimated_close == actual_close rows
+    in the dealer-pin scorecard: the after-close recorder logged a "forecast"
+    for the same day's already-expired 0DTE, anchored on the settled close, and
+    the grader then scored it against that very close (naive error exactly 0).
+    Such rows are not forecasts and must never be graded. Timestamps are
+    interpreted as Pacific (how the ledger records them).
+    """
+    expiry = _naive_day(pred.get("expiry", ""))
+    ts = pd.to_datetime(pred.get("pred_time", pred.get("timestamp")), errors="coerce")
+    if pd.isna(expiry) or pd.isna(ts):
+        return False  # not enough information — let the normal path decide
+    if ts.tz is not None:
+        ts = ts.tz_localize(None)
+    elif ts < _LEDGER_TZ_CUTOVER and _PT is not None:
+        ts = ts.tz_localize("UTC").tz_convert(_PT).tz_localize(None)
+    if ts.normalize() > expiry:
+        return True
+    return ts.normalize() == expiry and ts.time() >= _MARKET_CLOSE_PT
+
+
+def drop_degenerate_outcomes(outcomes: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filter already-graded rows that carry the post-close self-grading signature:
+    a same-day "forecast" whose prediction-time spot equals the realized close
+    exactly (naive error 0.0) — only possible when the forecast was anchored on
+    the answer. Legacy rows lack pred_time, so the signature is the only way to
+    identify them retroactively; new degenerate rows can no longer be written.
+    """
+    if outcomes is None or outcomes.empty:
+        return outcomes
+    df = outcomes.copy()
+    same_day = (
+        df.get("pred_date").astype(str).str[:10]
+        == df.get("expiry").astype(str).str[:10]
+    )
+    naive = pd.to_numeric(df.get("naive_abs_err"), errors="coerce")
+    spot = pd.to_numeric(df.get("spot_at_pred"), errors="coerce")
+    actual = pd.to_numeric(df.get("actual_close"), errors="coerce")
+    degenerate = same_day & (naive == 0) & (spot == actual)
+    # A row with a recorded pre-close pred_time is a legitimate same-day call
+    # even if the close happened to land exactly on spot — keep it. Compare via
+    # hour/minute (NaN-safe) — .dt.time comparisons raise on an all-NaT column.
+    if "pred_time" in df.columns:
+        pt = pd.to_datetime(df["pred_time"], errors="coerce")
+        close_min = _MARKET_CLOSE_PT.hour * 60 + _MARKET_CLOSE_PT.minute
+        legit = (pt.dt.hour * 60 + pt.dt.minute) < close_min
+        degenerate &= ~legit.fillna(False)
+    return df[~degenerate].reset_index(drop=True)
 
 
 def pending_predictions(
