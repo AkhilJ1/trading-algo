@@ -12,13 +12,17 @@ name: Daily Prediction Recorder
 # UTC run picked today's already-closed 0DTE, anchored on the settled close —
 # which is how estimated_close == actual_close rows got into the scorecard.)
 #
-# GitHub cron is UTC-only and ignores DST, so 1:16pm PT needs a PAIR of crons
-# (PDT = UTC-7, PST = UTC-8); a gate job lets only the correct one through.
+# GitHub cron is UTC-only, ignores DST, and delivers scheduled runs on this
+# repo 2–4 HOURS late (observed Jun 5–10, 2026), which lands a single
+# 20:16Z cron at ~16:4x PT — outside the gate's 1–3:59pm PT window — and the
+# day silently records nothing. The crons are dense WAKE-UPS spanning the
+# window minus the expected delay; the gate owns the actual clock. Extra
+# wake-ups no-op in seconds and recording is idempotent (the ledger keeps
+# the latest row per ticker per day), so the frequency is harmless.
 
 on:
   schedule:
-    - cron: "16 20 * * 1-5"   # 1:16pm PDT (Mar–Nov)
-    - cron: "16 21 * * 1-5"   # 1:16pm PST (Nov–Mar)
+    - cron: "16,46 17-23 * * 1-5"   # wake-ups → gate passes only 1–3:59pm PT
   workflow_dispatch: {}   # allow manual runs from the Actions tab
 
 permissions:
@@ -42,12 +46,16 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           H=$(TZ=America/Los_Angeles date +%H)
+          D=$(TZ=America/Los_Angeles date +%u)
           echo "Pacific time now: $(TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M %Z')"
-          # 13 = on time (1:16pm PT); 14/15 tolerate GitHub cron delay.
-          # Rejects the wrong DST cron of the pair (12:16pm PT, mid-session).
+          # 13 = on time (1:16pm PT); 14/15 tolerate further delay.
+          # Rejects mid-session and weekend wake-ups.
+          if [ "$D" -gt 5 ]; then
+            echo "Weekend — skipping."; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           case "$H" in
             13|14|15) echo "run=true" >> "$GITHUB_OUTPUT" ;;
-            *) echo "Market not yet closed in PT (wrong DST cron of the pair). Skipping."
+            *) echo "Market not yet closed in PT (mid-session wake-up). Skipping."
                echo "run=false" >> "$GITHUB_OUTPUT" ;;
           esac
 
