@@ -254,3 +254,36 @@ def test_held_support_vector_floors_the_pin():
     out = compute_dealer_pin_close(600.0, 595.0, gex, _FR, _IV, 'transitional',
                                    vectors=vectors)
     assert out['estimated_close'] >= 599.0 - 1e-9
+
+
+# ── fractal-dimension degenerate windows (the vertical-spike artifact) ──────
+
+def test_fd_flat_window_yields_nan_not_random_walk():
+    """A flat tape (zero variance — typical thin pre-market 5m bars) has no
+    meaningful dimension. The old 1.5 fallback made the intraday FD line hop
+    vertically between 1.5 and the ~1.0 clip floor of near-flat windows."""
+    import numpy as np
+    import pandas as pd
+    from strategies.fractal_indicators import calculate_fractal_dimension
+
+    n = 80
+    close = np.full(n, 100.0)               # perfectly flat
+    df = pd.DataFrame({'Close': close},
+                      index=pd.date_range('2026-06-09 04:00', periods=n, freq='5min'))
+    fd = calculate_fractal_dimension(df, window=30)
+    assert fd.iloc[30:].isna().all()        # no fabricated 1.5 values
+
+
+def test_fd_normal_series_still_computes():
+    import numpy as np
+    import pandas as pd
+    from strategies.fractal_indicators import calculate_fractal_dimension
+
+    rng = np.random.default_rng(3)
+    close = 100 + np.cumsum(rng.normal(0, 0.3, 200))
+    df = pd.DataFrame({'Close': close},
+                      index=pd.date_range('2026-01-01', periods=200, freq='B'))
+    fd = calculate_fractal_dimension(df, window=30)
+    vals = fd.dropna()
+    assert len(vals) > 150
+    assert ((vals >= 1.0) & (vals <= 2.0)).all()

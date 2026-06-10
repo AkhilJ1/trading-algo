@@ -419,7 +419,12 @@ def calculate_fractal_dimension(
             h = np.clip(h, 0.0, 1.0)
             fd[i] = 2.0 - h
         else:
-            fd[i] = 1.5
+            # Degenerate window (flat tape: zero variance/range) — common in
+            # thin pre/post-market bars. There is no meaningful dimension to
+            # report; snapping to 1.5 here made the intraday FD line hop
+            # vertically between 1.5 ("random walk") and ~1.0 (the clip floor
+            # of near-flat windows) bar after bar. NaN leaves an honest gap.
+            fd[i] = np.nan
 
     return pd.Series(fd, index=df.index, name='fractal_dimension')
 
