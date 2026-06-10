@@ -237,3 +237,32 @@ def test_hourly_interval_maps_to_thirty_minute_endpoint_not_daily():
                             "volume": 1, "datetime": 1781011800000}]}
     _provider_with(_C(price=candles)).get_price_history("SPY", "1mo", "1h")
     assert calls == ["30m"]
+
+
+def test_minute_history_requests_extended_hours():
+    """Minute endpoints must ask Schwab for pre/post-market candles —
+    RTH-only responses left the charts' last candle at 12:55pm PT with no
+    closing/after-hours prints. The daily endpoint takes no such kwarg."""
+    seen = {}
+    candles = {"candles": [{"open": 1, "high": 2, "low": 0.5, "close": 1.5,
+                            "volume": 1, "datetime": 1781011800000}]}
+    class _C(_FakeClient):
+        def get_price_history_every_five_minutes(self, symbol, start_datetime=None,
+                                                 end_datetime=None, **kw):
+            seen.update(kw)
+            return _Resp(self._price)
+    _provider_with(_C(price=candles)).get_price_history("SPY", "2d", "5m")
+    assert seen.get("need_extended_hours_data") is True
+
+
+def test_minute_history_tolerates_old_schwab_py_without_kwarg():
+    """Older schwab-py without need_extended_hours_data must still work via
+    the TypeError fallback (RTH-only, but never a blank chart)."""
+    candles = {"candles": [{"open": 1, "high": 2, "low": 0.5, "close": 1.5,
+                            "volume": 1, "datetime": 1781011800000}]}
+    class _C(_FakeClient):
+        def get_price_history_every_five_minutes(self, symbol, start_datetime=None,
+                                                 end_datetime=None):
+            return _Resp(self._price)   # no extended-hours kwarg accepted
+    df = _provider_with(_C(price=candles)).get_price_history("SPY", "2d", "5m")
+    assert not df.empty
