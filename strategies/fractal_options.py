@@ -16,7 +16,7 @@ Signals:
 """
 
 import math
-from datetime import date, datetime
+from datetime import date, datetime, time as dtime_cls
 from typing import Optional
 
 import numpy as np
@@ -201,28 +201,62 @@ def compute_gex_boundaries(gex_df: pd.DataFrame, spot: float) -> dict:
 
 # ── Options Analytics ─────────────────────────────────────────────────────
 
+def _gex_time_to_expiry(expiry_str: str, now_et: Optional[datetime] = None) -> float:
+    """
+    Time to expiry in YEARS for the gamma calculation, honest intraday.
+
+    The old `max(days, 1) / 365` treated a 0DTE chain as having a FULL day
+    left all session long — at 3 hours to the close that understates ATM
+    gamma ~2.8x (gamma ATM scales ~1/sqrt(T)) and overstates wing gamma,
+    distorting the intraday GEX profile exactly when the 0DTE pin matters.
+    For a same-day expiry we now use the actual time remaining to the
+    16:00 ET close (floored at 30 minutes so gamma can't blow up into the
+    bell); multi-day expiries keep the whole-day convention.
+    """
+    try:
+        from options_fetcher import _now_et
+        now = now_et or _now_et()
+        if hasattr(now, 'tzinfo') and now.tzinfo is not None:
+            now = now.replace(tzinfo=None)
+    except Exception:
+        now = now_et or datetime.now()
+    try:
+        expiry_date = datetime.strptime(str(expiry_str)[:10], '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        expiry_date = now.date()
+
+    days = (expiry_date - now.date()).days
+    if days > 0:
+        return days / 365.0
+    # Same-day (or already-past) expiry: minutes remaining to the 16:00 ET
+    # close, floored at 30 minutes.
+    close_dt = datetime.combine(now.date(), dtime_cls(16, 0))
+    mins_left = max((close_dt - now).total_seconds() / 60.0, 30.0)
+    return mins_left / (365.0 * 24.0 * 60.0)
+
+
 def compute_gex_profile(
     calls: pd.DataFrame,
     puts: pd.DataFrame,
     spot: float,
     expiry_str: str,
     r: float = 0.045,
+    now_et: Optional[datetime] = None,
 ) -> pd.DataFrame:
     """
     Compute Gamma Exposure (GEX) per strike.
 
-    Dealers are short options, so:
-      Call GEX = +gamma * OI * 100 * spot  (positive — dealers buy on rise)
-      Put GEX  = -gamma * OI * 100 * spot  (negative — dealers sell on drop)
+    Standard naive dealer-positioning convention (dealers long the calls
+    customers sold, short the puts customers bought):
+      Call GEX = +gamma * OI * 100 * spot  (dealers dampen — buy dips/sell rips)
+      Put GEX  = -gamma * OI * 100 * spot  (dealers amplify — sell drops)
+    Units: $ of dealer hedge notional per $1 move in the underlying.
+    OI is the overnight-settled figure (same-day 0DTE opens are invisible
+    until the next settle — inherent to every OI-based GEX).
 
     Returns DataFrame: strike, call_gex, put_gex, net_gex
     """
-    today = date.today()
-    try:
-        expiry_date = datetime.strptime(expiry_str, '%Y-%m-%d').date()
-    except (ValueError, TypeError):
-        expiry_date = today
-    T = max((expiry_date - today).days, 1) / 365.0
+    T = _gex_time_to_expiry(expiry_str, now_et=now_et)
 
     # Filter to strikes within +/- 15% of spot
     lo, hi = spot * 0.85, spot * 1.15
