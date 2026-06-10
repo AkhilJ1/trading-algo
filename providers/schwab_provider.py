@@ -192,14 +192,31 @@ class SchwabProvider(DataProvider):
             '60m': getattr(client, 'get_price_history_every_thirty_minutes', None),
         }
         _endpoint = _minute_endpoints.get(_iv)
+        _is_minute = _endpoint is not None
         if _endpoint is None:
             _endpoint = client.get_price_history_every_day
         try:
-            resp = _endpoint(
-                symbol,
-                start_datetime=start,
-                end_datetime=end,
-            )
+            if _is_minute:
+                # Ask for pre/post-market candles explicitly — Schwab's API
+                # otherwise serves RTH-only, which left the charts' last
+                # candle at 12:55pm PT with no closing/after-hours prints.
+                try:
+                    resp = _endpoint(
+                        symbol,
+                        start_datetime=start,
+                        end_datetime=end,
+                        need_extended_hours_data=True,
+                    )
+                except TypeError:   # older schwab-py without the kwarg
+                    resp = _endpoint(
+                        symbol, start_datetime=start, end_datetime=end,
+                    )
+            else:
+                resp = _endpoint(
+                    symbol,
+                    start_datetime=start,
+                    end_datetime=end,
+                )
             data = resp.json()
         except Exception:
             return pd.DataFrame()

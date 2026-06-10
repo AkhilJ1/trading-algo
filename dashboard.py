@@ -2331,6 +2331,15 @@ elif page == '🔬 Fractal & Options':
                 if not _clipped.empty:
                     _amdf = _clipped
 
+            # Extended-hours bars can now arrive from the provider path too
+            # (Schwab serves pre/post when asked), not only the yfinance
+            # prepost fetch — detect them from the data (ET stamps, pre-shift)
+            # so the axis break SHOWS them instead of hiding the after-hours
+            # tape behind the RTH-only break.
+            if _is_intraday_data and not _eh_active and isinstance(_amdf.index, pd.DatetimeIndex):
+                _mins_et = _amdf.index.hour * 60 + _amdf.index.minute
+                _eh_active = bool(((_mins_et < 570) | (_mins_et >= 960)).any())
+
             # Display in PACIFIC: the feed's intraday bars are exchange (ET)
             # stamped; shift the index -3h for plotting only (ET and PT share
             # DST dates, so the offset is constant). Daily-fallback bars are
@@ -3089,7 +3098,10 @@ elif page == '🔬 Fractal & Options':
         if _fs_intraday:
             fig_frac.update_xaxes(rangebreaks=[
                 dict(bounds=['sat', 'mon']),
-                dict(bounds=[13, 6.5], pattern='hour'),   # RTH in PT
+                # Show the full extended session (1:00am-5:00pm PT) so the
+                # close and after-hours prints render; hide only the dead
+                # overnight window.
+                dict(bounds=[17, 1], pattern='hour'),
             ])
         fig_frac.update_yaxes(gridcolor='#1e2130')
         mobilize(fig_frac, height_mobile=560)
