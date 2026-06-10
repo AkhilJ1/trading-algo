@@ -2813,7 +2813,19 @@ elif page == '🔬 Fractal & Options':
                         _fs_df.index = _fs_df.index - pd.Timedelta(hours=3)
                         _fs_df = _fs_add_fractals(_fs_df.copy())
                         try:
-                            _fs_df['fractal_dimension'] = _fs_fd(_fs_df)
+                            # FD on REGULAR-session bars only: pre/post-market
+                            # 5m bars are too thin for a meaningful rescaled-
+                            # range read (flat stretches made the FD line hop
+                            # vertically between the degenerate fallback and
+                            # the clip floor). RTH here is 6:30am–1:00pm PT —
+                            # the index was just shifted to Pacific above. A
+                            # centered 3-bar median kills remaining one-bar
+                            # flicker; extended-hours rows show as a gap.
+                            _m = _fs_df.index.hour * 60 + _fs_df.index.minute
+                            _rth_df = _fs_df[(_m >= 390) & (_m < 780)]
+                            _fd = _fs_fd(_rth_df).rolling(
+                                3, center=True, min_periods=1).median()
+                            _fs_df['fractal_dimension'] = _fd.reindex(_fs_df.index)
                         except Exception:
                             pass
                         price_df = _fs_df
