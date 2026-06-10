@@ -2060,8 +2060,8 @@ elif page == '🔬 Fractal & Options':
     iv_range = result['iv_range']
     vrp = result.get('vrp', {})
     k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric('Floor (1-sigma)', f"${floor_val:.2f}")
-    k2.metric('Ceiling (1-sigma)', f"${ceil_val:.2f}")
+    k1.metric('Floor', f"${floor_val:.2f}")
+    k2.metric('Ceiling', f"${ceil_val:.2f}")
     k3.metric('ATM IV', f"{iv_range.get('iv_used', 0)*100:.1f}%")
     k4.metric('Parkinson RV', f"{vrp.get('rv_parkinson', 0)*100:.1f}%" if vrp.get('rv_parkinson') else 'N/A')
     k5.metric('VRP Adj', f"IV overstates {vrp.get('vrp_pct', 0):.0f}%")
@@ -3029,10 +3029,10 @@ elif page == '🔬 Fractal & Options':
         proxy_floor = floor_val / r_ratio if r_ratio > 1 else floor_val
         proxy_ceil = ceil_val / r_ratio if r_ratio > 1 else ceil_val
         fig_frac.add_hline(y=proxy_floor, line=dict(color='#26a69a', width=2, dash='dash'),
-                           row=1, col=1, annotation_text=f"1σ Floor ${floor_val:.2f}",
+                           row=1, col=1, annotation_text=f"Floor ${floor_val:.2f}",
                            annotation_position='right')
         fig_frac.add_hline(y=proxy_ceil, line=dict(color='#ef5350', width=2, dash='dash'),
-                           row=1, col=1, annotation_text=f"1σ Ceiling ${ceil_val:.2f}",
+                           row=1, col=1, annotation_text=f"Ceiling ${ceil_val:.2f}",
                            annotation_position='right')
         # 2-sigma lines (lighter)
         r2s = ranges.get('2sigma', {})
