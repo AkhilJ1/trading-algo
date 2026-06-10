@@ -197,3 +197,43 @@ def test_get_option_chain_splits_calls_and_puts():
     assert list(calls["strike"]) == [420.0]
     assert list(puts["strike"]) == [410.0]
     assert abs(calls["impliedVolatility"].iloc[0] - 0.20) < 1e-9
+
+
+def test_price_history_timestamps_are_naive_eastern():
+    """Epoch-ms candles are UTC; the provider contract is NAIVE EASTERN
+    (matching yfinance after tz_localize(None)). Naive-UTC stamps sat +4/5h
+    off the ET clock, which pushed the afternoon session into the charts'
+    overnight rangebreak — the 'chart shows the wrong day's tape' bug on
+    Schwab-served intraday views."""
+    # 2026-06-09 13:30 UTC == 09:30 ET (the open, EDT) == epoch 1781011800000
+    # 2026-06-09 19:55 UTC == 15:55 ET (last RTH 5m bar) == 1781034900000
+    candles = {"candles": [
+        {"open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 1,
+         "datetime": 1781011800000},
+        {"open": 1.5, "high": 2.5, "low": 1, "close": 2.0, "volume": 2,
+         "datetime": 1781034900000},
+    ]}
+    class _C(_FakeClient):
+        def get_price_history_every_five_minutes(self, symbol, start_datetime=None, end_datetime=None):
+            return _Resp(self._price)
+    df = _provider_with(_C(price=candles)).get_price_history("SPY", "2d", "5m")
+    assert str(df.index[0]) == "2026-06-09 09:30:00"   # ET open, tz-naive
+    assert str(df.index[-1]) == "2026-06-09 15:55:00"  # ET afternoon PRESENT
+    assert df.index.tz is None
+
+
+def test_hourly_interval_maps_to_thirty_minute_endpoint_not_daily():
+    """'1h' has no Schwab endpoint; it must use the 30-minute one — falling
+    through to DAILY silently broke the Monthly structure view."""
+    calls = []
+    class _C(_FakeClient):
+        def get_price_history_every_thirty_minutes(self, symbol, start_datetime=None, end_datetime=None):
+            calls.append("30m")
+            return _Resp(self._price)
+        def get_price_history_every_day(self, symbol, start_datetime=None, end_datetime=None):
+            calls.append("daily")
+            return _Resp(self._price)
+    candles = {"candles": [{"open": 1, "high": 2, "low": 0.5, "close": 1.5,
+                            "volume": 1, "datetime": 1781011800000}]}
+    _provider_with(_C(price=candles)).get_price_history("SPY", "1mo", "1h")
+    assert calls == ["30m"]

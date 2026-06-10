@@ -185,6 +185,11 @@ class SchwabProvider(DataProvider):
             '10m': getattr(client, 'get_price_history_every_ten_minutes', None),
             '15m': getattr(client, 'get_price_history_every_fifteen_minutes', None),
             '30m': getattr(client, 'get_price_history_every_thirty_minutes', None),
+            # Schwab has no hourly endpoint; 30-minute bars are the closest
+            # intraday granularity (falling to DAILY here silently broke the
+            # Monthly structure view, which asks for 1h).
+            '1h': getattr(client, 'get_price_history_every_thirty_minutes', None),
+            '60m': getattr(client, 'get_price_history_every_thirty_minutes', None),
         }
         _endpoint = _minute_endpoints.get(_iv)
         if _endpoint is None:
@@ -207,7 +212,15 @@ class SchwabProvider(DataProvider):
         # Schwab fields: open, high, low, close, volume, datetime (epoch ms).
         if 'datetime' not in df.columns:
             return pd.DataFrame()
-        idx = pd.to_datetime(df['datetime'], unit='ms')
+        # Epoch ms is UTC. The provider contract (matching yfinance after the
+        # callers' tz_localize(None)) is NAIVE EASTERN — converting via UTC
+        # matters enormously for intraday bars: naive-UTC stamps sit +4/5h off
+        # the ET clock, which pushed the whole afternoon session into the
+        # charts' overnight rangebreak (the "chart shows the wrong day's
+        # tape" bug on Schwab-served intraday views).
+        idx = (pd.to_datetime(df['datetime'], unit='ms', utc=True)
+                 .dt.tz_convert('America/New_York')
+                 .dt.tz_localize(None))
         df = df.rename(columns={
             'open': 'Open', 'high': 'High', 'low': 'Low',
             'close': 'Close', 'volume': 'Volume',
