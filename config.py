@@ -111,6 +111,10 @@ LEVEL_SNAP_BLEND_BASE = 0.50    # weight on the level when one source backs it
 LEVEL_SNAP_BLEND_STEP = 0.15    # extra weight per additional independent source
 LEVEL_SNAP_BLEND_MAX = 0.85     # never fully abandon the calibrated IV band edge
 
+# Reaction levels: a defended level must sit at least this far from spot to
+# count — a wall strike exactly at the current price is not a reaction level.
+REACTION_MIN_DISTANCE_PCT = 0.1
+
 # Dealer-pin bracket gate: structure (fractals/neurals/vectors) closer to spot
 # than this many daily expected moves cannot tighten the pin bracket — a
 # trendline running through current price would otherwise glue the estimated
