@@ -1776,7 +1776,6 @@ elif page == '🔬 Fractal & Options':
         # imported — the website never writes the forecast ledger (that is
         # automation-only; see the "automation-only" note further below).
         read_predictions, read_predictions_csv,
-        read_outcomes, read_outcomes_csv,
         read_weight_history, log_weight_change,
     )
     _sheets_ok = is_sheets_available()
@@ -3119,153 +3118,25 @@ elif page == '🔬 Fractal & Options':
         # (hist_df.index > pred_date), so same-day 0DTE forecasts never got a
         # close ("requires at least one subsequent trading day") and it merely
         # duplicated — less rigorously — the graded Outcomes views below. The
-        # scored ledgers (Dealer-Pin Close + Pre-Open Pin) are the single source
-        # of truth for accuracy, and they are fed only by the scheduled jobs.
+        # scored ledger (Dealer-Pin Close, from the pre-open pin pipeline) is
+        # the single source of truth for accuracy, fed only by the scheduled jobs.
 
-        # ── Dealer-Pin Close — Scored Track Record ────────────────────────────
-        # Reads the durable, graded Outcomes ledger and shows whether the
-        # dealer-pin estimated close actually beats the naive "price stays at spot"
-        # baseline — net of nothing, just honest forecast-vs-realized error that
-        # grows one trading day at a time.
+        # ── Dealer-Pin Close — Track Record (the 6:25am pre-open call) ───────
+        # ONE dealer-pin close prediction per day: recorded pre-market at
+        # 6:25am PT — anchored on the live pre-market spot and the overnight-
+        # settled 0DTE chain (OI/max-pain/gamma are fixed by then) — and graded
+        # against that day's actual closing print at 1:16pm PT. Sourced from
+        # the PinForecasts/PinOutcomes ledgers. The after-close daily recorder
+        # still logs a reference row into Predictions/Outcomes for calibration
+        # research, but it is NOT displayed here — the pre-open call is the
+        # scored dealer-pin track record.
         st.subheader('Dealer-Pin Close — Track Record')
         st.caption(
-            'Recorded after the close (1:16pm PT) for the NEXT session\'s expiry — '
-            'an overnight dealer-pin forecast. Each matured forecast is scored '
-            'against the realized close AND against the naive "price just stays at '
-            'spot" null model. Skill = naive error − model error; positive means '
-            'the dealer-pin estimate added value.'
-        )
-        try:
-            from track_record import (
-                summarize_track_record, join_predictions_outcomes,
-                drop_degenerate_outcomes,
-            )
-
-            out_df = read_outcomes() if _sheets_ok else read_outcomes_csv()
-            tkr = result['ticker']
-            if out_df is not None and not out_df.empty and 'ticker' in out_df.columns:
-                tkr_out = out_df[out_df['ticker'].astype(str).str.upper() == tkr.upper()].copy()
-            else:
-                tkr_out = out_df if out_df is not None else pd.DataFrame()
-
-            # Drop legacy self-graded rows: "forecasts" recorded AFTER their own
-            # expiry's close, where spot == actual by construction (the
-            # estimated == actual artifact). The recorders/graders can no longer
-            # produce these, but the old rows still live in the Outcomes ledger.
-            n_before = len(tkr_out) if tkr_out is not None else 0
-            tkr_out = drop_degenerate_outcomes(tkr_out)
-            n_dropped = n_before - (len(tkr_out) if tkr_out is not None else 0)
-            if n_dropped:
-                st.caption(
-                    f'ℹ️ {n_dropped} legacy row(s) excluded: they were recorded after '
-                    'their own expiry had closed (estimated = actual by construction), '
-                    'so they are not forecasts and are not scored.'
-                )
-
-            summ = summarize_track_record(tkr_out)
-            if summ['n_graded'] == 0:
-                st.info(
-                    f'No graded forecasts for {tkr} yet. Forecasts are graded the day '
-                    'after their expiry closes — the track record fills in automatically '
-                    'as days mature.'
-                )
-            else:
-                beats = summ['beats_naive']
-                if beats:
-                    st.success(
-                        f"✅ Beats the naive baseline — mean error "
-                        f"${summ['mean_abs_err']:.2f} vs ${summ['naive_mean_abs_err']:.2f} "
-                        f"for \"stays at spot\" across {summ['n_graded']} graded forecast(s)."
-                    )
-                else:
-                    st.warning(
-                        f"⚠️ Not yet beating the naive baseline — mean error "
-                        f"${summ['mean_abs_err']:.2f} vs ${summ['naive_mean_abs_err']:.2f} "
-                        f"for \"stays at spot\" across {summ['n_graded']} graded forecast(s)."
-                    )
-
-                tr1, tr2, tr3, tr4 = st.columns(4)
-                tr1.metric('Graded Forecasts', summ['n_graded'])
-                skill = summ['mean_skill']
-                tr2.metric(
-                    'Mean Skill ($)',
-                    f"{skill:+.2f}" if skill is not None else '—',
-                    help='Avg ($) the model beat the naive spot baseline by. Positive = adds value.',
-                )
-                tr3.metric(
-                    'Skill Rate',
-                    f"{summ['skill_rate'] * 100:.0f}%" if summ['skill_rate'] is not None else '—',
-                    help='Share of forecasts that beat the naive baseline.',
-                )
-                tr4.metric(
-                    'Direction Accuracy',
-                    f"{summ['dir_accuracy'] * 100:.0f}%" if summ['dir_accuracy'] is not None else '—',
-                    help='Share of forecasts that called up/down vs spot correctly.',
-                )
-
-                tr5, tr6, tr7 = st.columns(3)
-                tr5.metric('Mean Abs Error', f"${summ['mean_abs_err']:.2f}")
-                tr6.metric('Naive Baseline Error', f"${summ['naive_mean_abs_err']:.2f}")
-                tr7.metric(
-                    'In-Range Rate',
-                    f"{summ['in_range_rate'] * 100:.0f}%" if summ['in_range_rate'] is not None else '—',
-                    help='Share of realized closes that landed inside the [floor, ceiling] band.',
-                )
-
-                # Progress over time: cumulative mean skill as the record grows.
-                prog = tkr_out.copy()
-                prog['pred_date'] = pd.to_datetime(prog['pred_date'], errors='coerce')
-                prog = prog.dropna(subset=['pred_date']).sort_values('pred_date')
-                prog['skill'] = pd.to_numeric(prog['skill'], errors='coerce')
-                prog = prog.dropna(subset=['skill'])
-                if len(prog) >= 2:
-                    prog['Cumulative Mean Skill ($)'] = prog['skill'].expanding().mean()
-                    chart = prog.set_index('pred_date')[['Cumulative Mean Skill ($)']]
-                    st.markdown('**Progress over time** — cumulative mean skill vs the naive baseline')
-                    st.line_chart(chart)
-                    st.caption('Above zero and trending up = the forecast is learning to beat "do nothing."')
-
-                with st.expander(f'Graded forecasts ({summ["n_graded"]})'):
-                    show = tkr_out.copy()
-                    show = show.sort_values(
-                        'pred_date', ascending=False,
-                        key=lambda s: pd.to_datetime(s, errors='coerce'),
-                    )
-                    # Render dates as plain dates and the forecast's recording
-                    # time as an actual clock time (Pacific) — a datetime-cast
-                    # date column shows a meaningless 00:00:00.
-                    show['pred_date'] = show['pred_date'].astype(str).str[:10]
-                    if 'pred_time' in show.columns:
-                        _pt = pd.to_datetime(show['pred_time'], errors='coerce')
-                        show['pred_time'] = _pt.dt.strftime('%H:%M').fillna('—')
-                    cols = [c for c in [
-                        'pred_date', 'pred_time', 'expiry', 'spot_at_pred',
-                        'estimated_close', 'actual_close', 'close_abs_err',
-                        'naive_abs_err', 'skill', 'in_range', 'dir_correct',
-                    ] if c in show.columns]
-                    st.dataframe(
-                        show[cols].rename(columns={
-                            'pred_date': 'Pred Date', 'pred_time': 'Pred Time (PT)',
-                        }).head(60),
-                        width='stretch', hide_index=True,
-                    )
-        except Exception as e:
-            st.warning(f'Could not load track record: {e}')
-
-        # ── Pre-Open Pin — Scored Track Record (item 6) ───────────────────────
-        # The automation also records a SEPARATE pre-open pin forecast (~9:15 ET,
-        # before the open) into PinForecasts and grades it into PinOutcomes the
-        # next day. That ledger was being written + graded but never surfaced on
-        # the site — so the pre-open call had no visible scorecard. Same scoring
-        # math as the after-close pin (skill vs the naive "stays at spot" null),
-        # just sourced from the pin ledger.
-        st.markdown('---')
-        st.subheader('Pre-Open Pin — Track Record')
-        st.caption(
-            'A separate forecast of the closing print, logged pre-market at '
-            '6:25am PT and graded against the realized close at 1:16pm PT the '
-            'same day. Scored the same way: skill = naive error − model error, '
-            'so positive means the pre-open pin added value.'
+            'Forecast of the closing print, logged pre-market at 6:25am PT '
+            '(live pre-market spot + overnight-settled 0DTE chain) and graded '
+            'against the realized close at 1:16pm PT the same day. Skill = '
+            'naive error − model error, so positive means the pin added value '
+            'over "price just stays at spot."'
         )
         try:
             from track_record import (
@@ -3297,7 +3168,7 @@ elif page == '🔬 Fractal & Options':
 
             if fc.empty:
                 st.info(
-                    f'No pre-open pin forecasts recorded for {_tkr} yet. The '
+                    f'No dealer-pin close forecasts recorded for {_tkr} yet. The '
                     'automation logs one pre-market at 6:25am PT; it appears '
                     'here as soon as it is recorded, then earns a grade at '
                     '1:16pm PT after that day\'s close.'
@@ -3324,13 +3195,13 @@ elif page == '🔬 Fractal & Options':
                 if psumm['n_graded'] > 0:
                     if psumm['beats_naive']:
                         st.success(
-                            f"✅ Pre-open pin beats the naive baseline — mean error "
+                            f"✅ Dealer pin beats the naive baseline — mean error "
                             f"${psumm['mean_abs_err']:.2f} vs ${psumm['naive_mean_abs_err']:.2f} "
                             f"for \"stays at spot\" across {psumm['n_graded']} graded forecast(s)."
                         )
                     else:
                         st.warning(
-                            f"⚠️ Pre-open pin not yet beating the naive baseline — mean error "
+                            f"⚠️ Dealer pin not yet beating the naive baseline — mean error "
                             f"${psumm['mean_abs_err']:.2f} vs ${psumm['naive_mean_abs_err']:.2f} "
                             f"for \"stays at spot\" across {psumm['n_graded']} graded forecast(s)."
                         )
@@ -3362,9 +3233,22 @@ elif page == '🔬 Fractal & Options':
                         f"{psumm['in_range_rate'] * 100:.0f}%" if psumm['in_range_rate'] is not None else '—',
                         help='Share of realized closes inside the pre-open [floor, ceiling] band.',
                     )
+
+                    # Progress over time: cumulative mean skill as the record grows.
+                    prog = pin_out.copy()
+                    prog['pred_date'] = pd.to_datetime(prog['pred_date'], errors='coerce')
+                    prog = prog.dropna(subset=['pred_date']).sort_values('pred_date')
+                    prog['skill'] = pd.to_numeric(prog['skill'], errors='coerce')
+                    prog = prog.dropna(subset=['skill'])
+                    if len(prog) >= 2:
+                        prog['Cumulative Mean Skill ($)'] = prog['skill'].expanding().mean()
+                        chart = prog.set_index('pred_date')[['Cumulative Mean Skill ($)']]
+                        st.markdown('**Progress over time** — cumulative mean skill vs the naive baseline')
+                        st.line_chart(chart)
+                        st.caption('Above zero and trending up = the pin is learning to beat "do nothing."')
                 elif n_pending:
                     st.info(
-                        f'{n_pending} pre-open pin forecast(s) recorded and awaiting a '
+                        f'{n_pending} dealer-pin close forecast(s) recorded and awaiting a '
                         'realized close — the skill scorecard fills in automatically '
                         'after each session closes.'
                     )
@@ -3405,7 +3289,7 @@ elif page == '🔬 Fractal & Options':
                     width='stretch', hide_index=True,
                 )
         except Exception as e:
-            st.warning(f'Could not load pre-open pin track record: {e}')
+            st.warning(f'Could not load dealer-pin track record: {e}')
 
         # ── Signal Weights & Auto-Retune ──────────────────────────────────
         st.markdown('---')
