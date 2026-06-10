@@ -2585,17 +2585,29 @@ elif page == '🔬 Fractal & Options':
             # ── Right-edge label collision pass ────────────────────────────
             # Convert each label's price to approximate pixel space; walking
             # bottom-up, any label that would overlap the one below it is
-            # nudged up just enough to clear (yshift in px). Lines stay at
-            # their exact prices — only the text tags fan apart.
+            # nudged up just enough to clear (yshift in px). A second pass
+            # clamps the stack under the top of the plot — without it the
+            # topmost tags (call wall / seller objective near the range high)
+            # get pushed out of the chart area. Lines stay at their exact
+            # prices — only the text tags fan apart.
             _plot_px = 640 - 120                       # chart height minus margins
             _ppu = _plot_px / max(_yb_top - _yb_bottom, 1e-9)
             _lbl_h = 14                                # px footprint per tag
-            _last_px = None
-            for _yv, _txt, _col, _fs in sorted(_am_labels, key=lambda t: t[0]):
-                _nat_px = (_yv - _yb_bottom) * _ppu    # natural position
-                _px = _nat_px
+            _ordered = sorted(_am_labels, key=lambda t: t[0])
+            _pxs, _last_px = [], None
+            for _yv, _txt, _col, _fs in _ordered:
+                _px = (_yv - _yb_bottom) * _ppu
                 if _last_px is not None and _px < _last_px + _lbl_h:
                     _px = _last_px + _lbl_h
+                _pxs.append(_px)
+                _last_px = _px
+            _cap = _plot_px - 6
+            for _i in range(len(_pxs) - 1, -1, -1):
+                if _pxs[_i] > _cap:
+                    _pxs[_i] = _cap
+                _cap = _pxs[_i] - _lbl_h
+            for (_yv, _txt, _col, _fs), _px in zip(_ordered, _pxs):
+                _nat_px = (_yv - _yb_bottom) * _ppu
                 fig_am.add_annotation(
                     xref='paper', x=1.0, xanchor='right',
                     y=_yv, yref='y', yanchor='middle', yshift=_px - _nat_px,
@@ -2603,7 +2615,6 @@ elif page == '🔬 Fractal & Options':
                     font=dict(color=_col, size=_fs),
                     bgcolor='rgba(14,17,23,0.6)',
                 )
-                _last_px = _px
 
             # ── Spot marker ────────────────────────────────────────────────
             if _am_spot_ax is not None:
@@ -2633,13 +2644,19 @@ elif page == '🔬 Fractal & Options':
                 )
 
             # ── Bias flag ──────────────────────────────────────────────────
+            # Lives in the top MARGIN band (above the plot area, next to the
+            # title) so it can never overlay the right-edge level tags — when
+            # the call wall / seller objective sit near the top of the price
+            # range, their tags occupy exactly the top-right corner the flag
+            # used to claim.
             _am_bias = result.get('bias', 'NEUTRAL')
             _am_conf = result.get('confidence', 0)
             _am_bcolor = ('#26a69a' if _am_bias == 'BULLISH'
                           else '#ef5350' if _am_bias == 'BEARISH' else '#ff9800')
             _am_barrow = '▲' if _am_bias == 'BULLISH' else '▼' if _am_bias == 'BEARISH' else '◆'
             fig_am.add_annotation(
-                xref='paper', x=0.99, y=0.98, yref='paper', xanchor='right', yanchor='top',
+                xref='paper', x=1.0, y=1.0, yref='paper', xanchor='right', yanchor='bottom',
+                yshift=4,
                 text=f"{_am_barrow} {_am_bias} · {_am_conf:.0f}%", showarrow=False,
                 font=dict(color=_am_bcolor, size=14),
                 bgcolor='rgba(14,17,23,0.65)', bordercolor=_am_bcolor, borderwidth=1,
