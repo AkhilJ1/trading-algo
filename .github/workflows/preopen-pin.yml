@@ -13,18 +13,21 @@ name: Pre-Open Dealer-Pin
 #   * 1:16pm PT Mon–Fri → GRADE the morning estimate against the session's
 #     actual closing print (the close is 1:00pm PT / 16:00 ET).
 #
-# GitHub cron is UTC-only and ignores DST, so each Pacific time needs a PAIR
-# of crons (PDT = UTC-7, PST = UTC-8). Both fire year-round; a tiny gate job
-# checks the actual Pacific hour and lets only the correct one through. The
-# gate also rejects a badly delayed run (e.g. the recorder arriving mid-
-# session would not be a pre-open forecast any more).
+# GitHub cron is UTC-only, ignores DST, and — decisively — delivers scheduled
+# runs on this repo 2–4 HOURS late (observed Jun 5–10, 2026: the 13:25Z record
+# cron started 16:10–17:40Z every day). A single cron per target time
+# therefore sails straight past the honesty gates below and the day silently
+# records nothing. The crons are now dense WAKE-UPS spanning each target
+# window minus 0–4h of expected delay; the gates own the actual clock
+# (Pacific hour + weekday) and let exactly the honest runs through. Extra
+# wake-ups no-op in seconds, and both halves are idempotent (the ledger keeps
+# the latest record per day; grading skips anything already graded), so the
+# frequency is harmless.
 
 on:
   schedule:
-    - cron: "25 13 * * 1-5"   # record — 6:25am PDT (Mar–Nov)
-    - cron: "25 14 * * 1-5"   # record — 6:25am PST (Nov–Mar)
-    - cron: "16 20 * * 1-5"   # grade  — 1:16pm PDT (Mar–Nov)
-    - cron: "16 21 * * 1-5"   # grade  — 1:16pm PST (Nov–Mar)
+    - cron: "10,40 9-14 * * 1-5"   # record wake-ups → gate passes only the 6am PT hour
+    - cron: "16,46 17-23 * * 1-5"  # grade wake-ups  → gate passes only 1–3:59pm PT
   workflow_dispatch:
     inputs:
       mode:
@@ -41,10 +44,10 @@ concurrency:
 
 jobs:
   record-gate:
-    # Fires on either morning cron, or a manual dispatch with mode=record.
+    # Evaluates on EVERY scheduled wake-up (the Pacific-clock check inside is
+    # the real filter), or a manual dispatch with mode=record.
     if: >-
-      github.event.schedule == '25 13 * * 1-5' ||
-      github.event.schedule == '25 14 * * 1-5' ||
+      github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'record')
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -58,11 +61,12 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           H=$(TZ=America/Los_Angeles date +%H)
+          D=$(TZ=America/Los_Angeles date +%u)
           echo "Pacific time now: $(TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M %Z')"
-          if [ "$H" = "06" ]; then
+          if [ "$H" = "06" ] && [ "$D" -le 5 ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Not the 6am PT hour — wrong DST cron of the pair (or a long-delayed run that would no longer be pre-open). Skipping."
+            echo "Not a weekday 6am PT hour — a wake-up outside the pre-open window. Skipping."
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -130,10 +134,10 @@ jobs:
         run: rm -f "${{ github.workspace }}/gcp_sa.json" schwab_token.json
 
   grade-gate:
-    # Fires on either post-close cron, or a manual dispatch with mode=grade.
+    # Evaluates on EVERY scheduled wake-up (the Pacific-clock check inside is
+    # the real filter), or a manual dispatch with mode=grade.
     if: >-
-      github.event.schedule == '16 20 * * 1-5' ||
-      github.event.schedule == '16 21 * * 1-5' ||
+      github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'grade')
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -147,14 +151,18 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           H=$(TZ=America/Los_Angeles date +%H)
+          D=$(TZ=America/Los_Angeles date +%u)
           echo "Pacific time now: $(TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M %Z')"
-          # 13 = on time (1:16pm PT); 14/15 tolerate GitHub cron delay — the
-          # close has settled either way. Rejects the wrong DST cron of the
-          # pair (12:16pm PT, mid-session). A fully skipped day self-heals:
-          # grading is idempotent and the next run picks up anything pending.
+          # 13 = on time (1:16pm PT); 14/15 tolerate further delay — the close
+          # has settled either way. Rejects mid-session wake-ups. A fully
+          # skipped day self-heals: grading is idempotent and the next run
+          # picks up anything pending.
+          if [ "$D" -gt 5 ]; then
+            echo "Weekend — skipping."; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           case "$H" in
             13|14|15) echo "run=true" >> "$GITHUB_OUTPUT" ;;
-            *) echo "Market not yet closed in PT (wrong DST cron of the pair). Skipping."
+            *) echo "Market not yet closed in PT (mid-session wake-up). Skipping."
                echo "run=false" >> "$GITHUB_OUTPUT" ;;
           esac
 
