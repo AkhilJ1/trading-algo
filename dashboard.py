@@ -131,6 +131,13 @@ st.set_page_config(
 # enables pinch-zoom on phones (and wheel-zoom on desktop); pan as the drag
 # mode on mobile because drawing a zoom-box with a finger is miserable;
 # double-tap resets the view.
+# Unified chart typography: every price/value tag on every chart uses
+# FONT_TAG; headline badges (bias flag, structure verdict) use FONT_BADGE.
+# One notch smaller on phones. Mixing 9-14px tags across charts is what made
+# labels read inconsistently.
+FONT_TAG = 10 if IS_MOBILE else 11
+FONT_BADGE = 12 if IS_MOBILE else 13
+
 PLOTLY_CONFIG = {
     'displaylogo': False,
     'scrollZoom': True,
@@ -1198,11 +1205,11 @@ elif page == '📊 Stock Chart':
         for _, level in fractal_levels.get('support_levels', [])[:3]:
             fig.add_hline(y=level, line=dict(color='#26a69a', width=1, dash='dash'),
                           annotation_text=f'S ${level:.0f}', annotation_position='right',
-                          annotation=dict(font_size=10, font_color='#26a69a'), row=1, col=1)
+                          annotation=dict(font_size=FONT_TAG, font_color='#26a69a'), row=1, col=1)
         for _, level in fractal_levels.get('resistance_levels', [])[:3]:
             fig.add_hline(y=level, line=dict(color='#ef5350', width=1, dash='dash'),
                           annotation_text=f'R ${level:.0f}', annotation_position='right',
-                          annotation=dict(font_size=10, font_color='#ef5350'), row=1, col=1)
+                          annotation=dict(font_size=FONT_TAG, font_color='#ef5350'), row=1, col=1)
 
     # Anchored VWAP
     if show_anchored_vwap:
@@ -1248,7 +1255,7 @@ elif page == '📊 Stock Chart':
             # POC line
             fig.add_hline(y=vp['poc'], line=dict(color='#42a5f5', width=1, dash='dot'),
                           annotation_text=f"POC ${vp['poc']:.0f}",
-                          annotation=dict(font_size=10, font_color='#42a5f5',
+                          annotation=dict(font_size=FONT_TAG, font_color='#42a5f5',
                                           xanchor='left', x=0.01), row=1, col=1)
 
     # Entry/Exit markers
@@ -1646,7 +1653,7 @@ elif page == '🔁 Backtest':
                     z=pivot.values, x=list(pivot.columns), y=[str(y) for y in pivot.index],
                     colorscale='RdYlGn', zmid=0,
                     text=[[f'{v:.1f}%' if not np.isnan(v) else '' for v in row] for row in pivot.values],
-                    texttemplate='%{text}', textfont=dict(size=10),
+                    texttemplate='%{text}', textfont=dict(size=FONT_TAG),
                 ))
                 hm_fig.update_layout(
                     height=300, margin=dict(t=30, b=20, l=0, r=20),
@@ -2467,7 +2474,7 @@ elif page == '🔬 Fractal & Options':
                     fillcolor='rgba(255,214,0,0.10)', line_width=0, layer='below',
                     annotation_text='YELLOW BOX · value zone',
                     annotation_position='top left',
-                    annotation_font_color='#ffd600', annotation_font_size=12,
+                    annotation_font_color='#ffd600', annotation_font_size=FONT_TAG,
                 )
             # Upper distribution zone (ceiling → seller objective)
             if (_am_ceil1_ax is not None and _am_ceil2_ax is not None
@@ -2489,19 +2496,19 @@ elif page == '🔬 Fractal & Options':
             _am_labels = []   # (y_axis_value, text, color, font_size)
             if _am_ceil1_ax is not None:
                 fig_am.add_hline(y=_am_ceil1_ax, line=dict(color='#ef5350', width=2))
-                _am_labels.append((_am_ceil1_ax, f"Ceiling {_am_fmt(_am_ceil1)}", '#ef5350', 11))
+                _am_labels.append((_am_ceil1_ax, f"Ceiling {_am_fmt(_am_ceil1)}", '#ef5350', FONT_TAG))
             if _am_floor1_ax is not None:
                 fig_am.add_hline(y=_am_floor1_ax, line=dict(color='#26a69a', width=2))
-                _am_labels.append((_am_floor1_ax, f"Floor {_am_fmt(_am_floor1)}", '#26a69a', 11))
+                _am_labels.append((_am_floor1_ax, f"Floor {_am_fmt(_am_floor1)}", '#26a69a', FONT_TAG))
             if _am_ceil2_ax is not None:
                 fig_am.add_hline(y=_am_ceil2_ax, line=dict(color='#ef5350', width=1.5, dash='dash'))
-                _am_labels.append((_am_ceil2_ax, f"Seller Objective {_am_fmt(_am_ceil2)}", '#ff8a80', 11))
+                _am_labels.append((_am_ceil2_ax, f"Seller Objective {_am_fmt(_am_ceil2)}", '#ff8a80', FONT_TAG))
             if _am_floor2_ax is not None:
                 fig_am.add_hline(y=_am_floor2_ax, line=dict(color='#26a69a', width=1.5, dash='dash'))
-                _am_labels.append((_am_floor2_ax, f"Buyer Objective {_am_fmt(_am_floor2)}", '#80cbc4', 11))
+                _am_labels.append((_am_floor2_ax, f"Buyer Objective {_am_fmt(_am_floor2)}", '#80cbc4', FONT_TAG))
             if _am_pivot_ax is not None:
                 fig_am.add_hline(y=_am_pivot_ax, line=dict(color='#b0bec5', width=1.5, dash='dashdot'))
-                _am_labels.append((_am_pivot_ax, f"Pivot {_am_fmt(_am_pivot_disp)}", '#b0bec5', 11))
+                _am_labels.append((_am_pivot_ax, f"Pivot {_am_fmt(_am_pivot_disp)}", '#b0bec5', FONT_TAG))
 
             # ── Floor/ceiling history: one stepped line per analysis run ──
             # Every run (6:25am recorder, 1:16pm recorder, each dashboard
@@ -2598,7 +2605,7 @@ elif page == '🔬 Fractal & Options':
                                         showarrow=False,
                                         xanchor='right' if _at_right else 'left',
                                         yanchor='bottom' if _col == 'ceiling' else 'top',
-                                        font=dict(color=_txt_color, size=10),
+                                        font=dict(color=_txt_color, size=FONT_TAG),
                                         bgcolor='rgba(14,17,23,0.75)',
                                         bordercolor=_color, borderwidth=1,
                                         borderpad=2,
@@ -2618,11 +2625,11 @@ elif page == '🔬 Fractal & Options':
             if _am_in_band(_am_cwall):
                 _cw_lbl = _am_cwall * _am_ratio if _am_ratio > 1 else _am_cwall
                 fig_am.add_hline(y=_am_cwall, line=dict(color='#ef9a9a', width=1, dash='dot'))
-                _am_labels.append((_am_cwall, f"Call wall {_am_fmt(_cw_lbl)}", '#ef9a9a', 10))
+                _am_labels.append((_am_cwall, f"Call wall {_am_fmt(_cw_lbl)}", '#ef9a9a', FONT_TAG))
             if _am_in_band(_am_pwall):
                 _pw_lbl = _am_pwall * _am_ratio if _am_ratio > 1 else _am_pwall
                 fig_am.add_hline(y=_am_pwall, line=dict(color='#a5d6a7', width=1, dash='dot'))
-                _am_labels.append((_am_pwall, f"Put wall {_am_fmt(_pw_lbl)}", '#a5d6a7', 10))
+                _am_labels.append((_am_pwall, f"Put wall {_am_fmt(_pw_lbl)}", '#a5d6a7', FONT_TAG))
 
             # ── Right-edge label collision pass ────────────────────────────
             # Convert each label's price to approximate pixel space; walking
@@ -2665,7 +2672,7 @@ elif page == '🔬 Fractal & Options':
                 fig_am.add_annotation(
                     xref='paper', x=0.5, y=_am_spot_ax, yref='y',
                     text=f"◆ Spot {_am_fmt(_am_spot_disp)}", showarrow=False,
-                    font=dict(color='#ff9800', size=12), bgcolor='rgba(14,17,23,0.6)',
+                    font=dict(color='#ff9800', size=FONT_TAG), bgcolor='rgba(14,17,23,0.6)',
                 )
 
             # ── Distribution / accumulation annotations (Milk's wording) ───
@@ -2675,7 +2682,7 @@ elif page == '🔬 Fractal & Options':
                     xref='paper', x=0.03, y=_am_uy, yref='y', xanchor='left',
                     text="Sellers unload inventory on test —<br>resistive first attempts",
                     showarrow=False, align='left',
-                    font=dict(color='#ef5350', size=11), bgcolor='rgba(14,17,23,0.55)',
+                    font=dict(color='#ef5350', size=FONT_TAG), bgcolor='rgba(14,17,23,0.55)',
                 )
             if _am_floor1_ax is not None:
                 _am_ly = (_am_floor1_ax + _am_floor2_ax) / 2 if _am_floor2_ax else _am_floor1_ax
@@ -2683,7 +2690,7 @@ elif page == '🔬 Fractal & Options':
                     xref='paper', x=0.03, y=_am_ly, yref='y', xanchor='left',
                     text="Buyers value add on test —<br>supportive first attempts",
                     showarrow=False, align='left',
-                    font=dict(color='#26a69a', size=11), bgcolor='rgba(14,17,23,0.55)',
+                    font=dict(color='#26a69a', size=FONT_TAG), bgcolor='rgba(14,17,23,0.55)',
                 )
 
             # ── Bias flag ──────────────────────────────────────────────────
@@ -2701,7 +2708,7 @@ elif page == '🔬 Fractal & Options':
                 xref='paper', x=1.0, y=1.0, yref='paper', xanchor='right', yanchor='bottom',
                 yshift=4,
                 text=f"{_am_barrow} {_am_bias} · {_am_conf:.0f}%", showarrow=False,
-                font=dict(color=_am_bcolor, size=14),
+                font=dict(color=_am_bcolor, size=FONT_BADGE),
                 bgcolor='rgba(14,17,23,0.65)', bordercolor=_am_bcolor, borderwidth=1,
             )
 
@@ -2923,7 +2930,7 @@ elif page == '🔬 Fractal & Options':
                     x=_ts, y=_v, text=_tag, showarrow=False,
                     yanchor='bottom' if _side == 'H' else 'top',
                     yshift=10 if _side == 'H' else -10,
-                    font=dict(size=10,
+                    font=dict(size=FONT_TAG,
                               color='#26a69a' if _bull else '#ef5350'),
                     row=1, col=1,
                 )
@@ -2942,7 +2949,7 @@ elif page == '🔬 Fractal & Options':
                 fig_frac.add_annotation(
                     xref='paper', yref='paper', x=0.01, y=0.99,
                     xanchor='left', yanchor='top', text=_stxt, showarrow=False,
-                    font=dict(size=12, color=_scol),
+                    font=dict(size=FONT_BADGE, color=_scol),
                     bgcolor='rgba(14,17,23,0.7)', bordercolor=_scol,
                     borderwidth=1, borderpad=3,
                 )
@@ -2977,7 +2984,7 @@ elif page == '🔬 Fractal & Options':
                     showarrow=True, arrowhead=2, arrowsize=0.8,
                     arrowcolor='#26a69a' if _up else '#ef5350',
                     ax=0, ay=22 if _up else -22,
-                    font=dict(size=10,
+                    font=dict(size=FONT_TAG,
                               color='#26a69a' if _up else '#ef5350'),
                     row=1, col=1,
                 )
@@ -3058,7 +3065,7 @@ elif page == '🔬 Fractal & Options':
                     annotation_text=f"{_zlabel} ${_z['center']:.0f} (×{_z['bounces']})",
                     annotation_position='top right',
                     annotation_font_color=f'rgb({_rgb})',
-                    annotation_font_size=10,
+                    annotation_font_size=FONT_TAG,
                 )
 
         # Fractal dimension subplot — the regime dial that tells you HOW MUCH
@@ -3092,7 +3099,7 @@ elif page == '🔬 Fractal & Options':
                     x=_fd_series.index[-1], y=_fd_now,
                     text=f'{_fd_now:.2f} · {_fd_word}', showarrow=False,
                     xanchor='right', yanchor='bottom',
-                    font=dict(size=11, color=_fd_col),
+                    font=dict(size=FONT_TAG, color=_fd_col),
                     bgcolor='rgba(14,17,23,0.7)',
                     row=2, col=1,
                 )
