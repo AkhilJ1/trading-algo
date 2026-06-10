@@ -30,6 +30,8 @@ from config import (
     DEALER_BOUND_BLEND, CONFIDENCE_SIGMAS,
     NEURAL_TOLERANCE_PCT, NEURAL_LOOKBACK, VECTOR_MAX_AGE,
     NEURAL_BRACKET_MIN_STRENGTH,
+    LEVEL_SNAP_TOLERANCE_PCT, LEVEL_SNAP_MIN_SIGMA, LEVEL_SNAP_MAX_SIGMA,
+    LEVEL_SNAP_BLEND_BASE, LEVEL_SNAP_BLEND_STEP, LEVEL_SNAP_BLEND_MAX,
 )
 from options_fetcher import fetch_options_chain, fetch_expiration_dates
 from sheets_logger import pacific_now
@@ -588,8 +590,120 @@ def _compute_bias(signals):
     return bias, confidence
 
 
+def _collect_level_candidates(spot, side, gex_df=None, walls=None,
+                              neurals=None, fractal_levels=None, vectors=None):
+    """
+    Gather concrete price levels on one side of spot, tagged by evidence source.
+
+    side='floor'   → levels at/below spot (support candidates)
+    side='ceiling' → levels at/above spot (resistance candidates)
+
+    Sources (the MM-tool reading: dealer positioning first, structure second):
+      'gex'     — top per-strike |net GEX| strikes (dealer hedging flips there)
+      'oi_wall' — highest-activity OI strikes
+      'neural'  — multi-bounce horizontal zones (strength-gated)
+      'fractal' — recent Williams pivot levels
+      'vector'  — active sloped S/R line projected to today
+
+    Returns a list of (price, source) tuples.
+    """
+    below = side == 'floor'
+    out = []
+
+    if gex_df is not None and not gex_df.empty and 'net_gex' in gex_df.columns:
+        sub = gex_df[gex_df['strike'] < spot] if below else gex_df[gex_df['strike'] > spot]
+        sub = sub[sub['net_gex'].abs() > 0]
+        if not sub.empty:
+            top = sub.reindex(sub['net_gex'].abs().nlargest(3).index)
+            out.extend((float(s), 'gex') for s in top['strike'])
+
+    if walls:
+        wl = walls.get('put_walls' if below else 'call_walls') or []
+        for strike, _ in sorted(wl, key=lambda w: w[1], reverse=True)[:3]:
+            out.append((float(strike), 'oi_wall'))
+
+    if neurals:
+        zones = neurals.get('support_zones' if below else 'resistance_zones') or []
+        eligible = [z for z in zones
+                    if z.get('strength', 0) >= NEURAL_BRACKET_MIN_STRENGTH
+                    and ((z['center'] <= spot) if below else (z['center'] >= spot))]
+        out.extend((float(z['center']), 'neural') for z in eligible[:3])
+
+    if fractal_levels:
+        lv = fractal_levels.get('support_levels' if below else 'resistance_levels') or []
+        prices = [p for _, p in lv if ((p <= spot) if below else (p >= spot))]
+        out.extend((float(p), 'fractal') for p in prices[:3])
+
+    if vectors:
+        v = vectors.get('support_vector' if below else 'resistance_vector')
+        want_role = 'support' if below else 'resistance'
+        if v and v.get('role') == want_role and v.get('current_value'):
+            val = float(v['current_value'])
+            if (val < spot) if below else (val > spot):
+                out.append((val, 'vector'))
+
+    return out
+
+
+def _snap_level(spot, raw_edge, final_move, candidates, side):
+    """
+    Pick the strongest confluent level inside the snap window and blend the
+    raw 1-sigma band edge toward it.
+
+    Window: LEVEL_SNAP_MIN_SIGMA..LEVEL_SNAP_MAX_SIGMA final-moves from spot —
+    a "floor" sitting on top of spot is noise, and one beyond ~1.6 sigma is a
+    worse estimate than the calibrated band. Candidates within
+    LEVEL_SNAP_TOLERANCE_PCT of each other cluster into one level; clusters
+    rank by how many *independent* sources back them (the Fractal-Exchange
+    confluence idea), then member count, then proximity to the band edge.
+
+    Returns None (keep the band edge) or
+    {'level', 'snapped', 'blend', 'sources', 'n_members'}.
+    """
+    if final_move <= 0 or not candidates:
+        return None
+
+    below = side == 'floor'
+    near = spot - LEVEL_SNAP_MIN_SIGMA * final_move if below else spot + LEVEL_SNAP_MIN_SIGMA * final_move
+    far = spot - LEVEL_SNAP_MAX_SIGMA * final_move if below else spot + LEVEL_SNAP_MAX_SIGMA * final_move
+    lo, hi = (far, near) if below else (near, far)
+    in_window = [(p, s) for p, s in candidates if lo <= p <= hi]
+    if not in_window:
+        return None
+
+    # Greedy 1-D clustering (same scheme as fractal_indicators.cluster_levels)
+    # but carrying the source tag of every member.
+    clusters = []
+    for p, src in sorted(in_window):
+        if clusters and abs(p - clusters[-1]['center']) <= clusters[-1]['center'] * LEVEL_SNAP_TOLERANCE_PCT / 100.0:
+            c = clusters[-1]
+            c['members'].append((p, src))
+            c['center'] = sum(m for m, _ in c['members']) / len(c['members'])
+        else:
+            clusters.append({'center': p, 'members': [(p, src)]})
+
+    best = max(clusters, key=lambda c: (
+        len({s for _, s in c['members']}),
+        len(c['members']),
+        -abs(c['center'] - raw_edge),
+    ))
+    sources = sorted({s for _, s in best['members']})
+    blend = min(LEVEL_SNAP_BLEND_MAX,
+                LEVEL_SNAP_BLEND_BASE + LEVEL_SNAP_BLEND_STEP * (len(sources) - 1))
+    snapped = raw_edge * (1 - blend) + best['center'] * blend
+
+    return {
+        'level': round(best['center'], 2),
+        'snapped': round(snapped, 2),
+        'blend': round(blend, 2),
+        'sources': sources,
+        'n_members': len(best['members']),
+    }
+
+
 def _compute_floor_ceiling(
     spot, iv_range, vrp, vix_term, gex_bounds, walls, regime, fractal_dim,
+    gex_df=None, neurals=None, fractal_levels=None, vectors=None,
 ):
     """
     Evidence-based floor/ceiling computation.
@@ -600,6 +714,12 @@ def _compute_floor_ceiling(
       3. REGIME: Widen/narrow via fractal dimension + VIX term structure
       4. BOUND: Cap at GEX clusters + OI wall boundaries
       5. OUTPUT: Multiple confidence levels (68%, 87%, 95%)
+      6. SNAP: pull the primary floor/ceiling toward the strongest confluent
+         dealer/structure level (per-strike GEX, OI walls, neural zones,
+         fractal pivots, vectors) inside the snap window — floors and
+         ceilings live at actual defended strikes, not at a symmetric
+         distance from spot. The multi-sigma `ranges` envelope stays pure
+         band math (range_calibration parity).
     """
     # Step 1: Base daily move from IV
     base_move = iv_range.get('daily_expected_move', spot * 0.01)
@@ -663,9 +783,24 @@ def _compute_floor_ceiling(
         }
 
     primary = ranges['1sigma']
+
+    # Step 6: snap the primary floor/ceiling to confluent evidence levels.
+    floor_basis = _snap_level(
+        spot, primary['floor'], final_move,
+        _collect_level_candidates(spot, 'floor', gex_df=gex_df, walls=walls,
+                                  neurals=neurals, fractal_levels=fractal_levels,
+                                  vectors=vectors),
+        'floor')
+    ceiling_basis = _snap_level(
+        spot, primary['ceiling'], final_move,
+        _collect_level_candidates(spot, 'ceiling', gex_df=gex_df, walls=walls,
+                                  neurals=neurals, fractal_levels=fractal_levels,
+                                  vectors=vectors),
+        'ceiling')
+
     return {
-        'floor': primary['floor'],
-        'ceiling': primary['ceiling'],
+        'floor': floor_basis['snapped'] if floor_basis else primary['floor'],
+        'ceiling': ceiling_basis['snapped'] if ceiling_basis else primary['ceiling'],
         'ranges': ranges,
         'methodology': {
             'base_move': round(base_move, 2),
@@ -677,6 +812,8 @@ def _compute_floor_ceiling(
             'final_move': round(final_move, 2),
             'dealer_floor': round(dealer_floor, 2),
             'dealer_ceiling': round(dealer_ceil, 2),
+            'floor_basis': floor_basis,
+            'ceiling_basis': ceiling_basis,
         },
     }
 
@@ -1009,6 +1146,8 @@ def compute_composite_analysis(
     fc_result = _compute_floor_ceiling(
         spot=spot, iv_range=iv_range, vrp=vrp, vix_term=vix_term,
         gex_bounds=gex_bounds, walls=walls, regime=regime, fractal_dim=current_fd,
+        gex_df=gex_df, neurals=neurals, fractal_levels=fractal_levels,
+        vectors=vectors,
     )
     floor = fc_result['floor']
     ceiling = fc_result['ceiling']

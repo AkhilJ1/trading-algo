@@ -2139,6 +2139,17 @@ elif page == '🔬 Fractal & Options':
             f"Max Pain (info only): ${result['max_pain']:.2f}"
         )
 
+        # Level-snap provenance: which evidence levels the primary floor/ceiling
+        # snapped to (per-strike GEX, OI walls, neural zones, fractals, vectors),
+        # or the plain band edge when nothing confluent sat inside the window.
+        def _basis_txt(name, b):
+            if not b:
+                return f"{name}: IV band edge (no confluent level in snap window)"
+            return (f"{name}: snapped to ${b['level']:.2f} "
+                    f"[{', '.join(b['sources'])}] at {b['blend']:.0%} weight")
+        st.caption(_basis_txt('Floor', meth.get('floor_basis')) + '  |  '
+                   + _basis_txt('Ceiling', meth.get('ceiling_basis')))
+
     # VIX regime row. (The old "Ensemble Consensus" metric that lived here was
     # removed: the bias flag at the top of the page already carries the
     # directional verdict, and the metric cost an extra 1-year fetch plus a
