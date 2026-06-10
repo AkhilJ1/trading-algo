@@ -2488,20 +2488,17 @@ elif page == '🔬 Fractal & Options':
                         except Exception:
                             _lh['ts_et'] = _lh['timestamp']
                         _lh = _lh.dropna(subset=['ts_et']).sort_values('ts_et')
-                        # Window selection. A run from BEFORE the visible
-                        # window (last night's post-close call, the weekend's
-                        # last run) is still the live level when the session
-                        # opens — carry the latest one in, pinned to the left
-                        # edge, exactly like an overnight level print. Runs
-                        # after the last bar (tonight's after-hours analyses)
-                        # pin to the right edge. Everything else lands at its
-                        # own timestamp along the axis.
+                        # Window selection — CLEAN SLATE each session: only
+                        # runs from the visible window are drawn, so every
+                        # morning the 1D chart starts empty and fills in as
+                        # the day's runs land (6:25am print first). Yesterday's
+                        # prints never carry over; the LevelsHistory ledger
+                        # still keeps every row (the 1W view and research read
+                        # the full history). Runs after the last bar (tonight's
+                        # after-hours analyses) pin to the right edge.
                         _x_lo, _x_hi = _amdf.index.min(), _amdf.index.max()
-                        _pre = _lh[_lh['ts_et'] < _x_lo]
                         _lh = _lh[(_lh['ts_et'] >= _x_lo)
                                   & (_lh['ts_et'] <= _x_hi + pd.Timedelta(hours=6))]
-                        if not _pre.empty:
-                            _lh = pd.concat([_pre.tail(1), _lh])
                         _lh['x_pos'] = _lh['ts_et'].clip(lower=_x_lo, upper=_x_hi)
                     if not _lh.empty:
                         # Milk-style: each run's level is its own horizontal
