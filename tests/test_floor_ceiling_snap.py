@@ -198,3 +198,11 @@ def test_lone_fractal_pivot_is_not_defended():
 def test_reaction_levels_empty_inputs_are_safe():
     rl = nearest_reaction_levels(SPOT)
     assert rl == {'support': None, 'resistance': None}
+
+
+def test_reaction_level_at_spot_is_ignored():
+    # A wall strike sitting exactly at spot is not a reaction level — the next
+    # defended level out takes its place.
+    walls = {'put_walls': [(100.0, 9000), (98.9, 5000)], 'call_walls': []}
+    rl = nearest_reaction_levels(SPOT, walls=walls)
+    assert rl['support']['level'] == 98.9

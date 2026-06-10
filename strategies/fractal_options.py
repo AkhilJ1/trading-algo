@@ -32,7 +32,7 @@ from config import (
     NEURAL_BRACKET_MIN_STRENGTH,
     LEVEL_SNAP_TOLERANCE_PCT, LEVEL_SNAP_MIN_SIGMA, LEVEL_SNAP_MAX_SIGMA,
     LEVEL_SNAP_BLEND_BASE, LEVEL_SNAP_BLEND_STEP, LEVEL_SNAP_BLEND_MAX,
-    PIN_BRACKET_MIN_SIGMA,
+    PIN_BRACKET_MIN_SIGMA, REACTION_MIN_DISTANCE_PCT,
 )
 from options_fetcher import fetch_options_chain, fetch_expiration_dates
 from sheets_logger import pacific_now
@@ -692,10 +692,12 @@ def nearest_reaction_levels(spot, gex_df=None, walls=None, neurals=None,
     level, sources, n_members, distance, distance_pct.
     """
     out = {}
+    min_dist = spot * REACTION_MIN_DISTANCE_PCT / 100.0
     for side, key in (('floor', 'support'), ('ceiling', 'resistance')):
         cands = _collect_level_candidates(
             spot, side, gex_df=gex_df, walls=walls, neurals=neurals,
             fractal_levels=fractal_levels, vectors=vectors)
+        cands = [(p, s) for p, s in cands if abs(p - spot) >= min_dist]
         defended = [
             c for c in _cluster_candidates(cands)
             if len(c['sources']) >= 2 or set(c['sources']) & _DEFENDED_SINGLETON_SOURCES

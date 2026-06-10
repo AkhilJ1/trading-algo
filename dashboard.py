@@ -2070,23 +2070,25 @@ elif page == '🔬 Fractal & Options':
     # ── Nearest reaction levels ─────────────────────────────────────────────
     # First *defended* level above/below spot regardless of distance — the
     # trader's-eye "where does the tape react next?" readout. Distinct from
-    # floor/ceiling: these can sit pennies from spot.
+    # floor/ceiling: these can sit pennies from spot. Always rendered so a run
+    # with no defended levels is visibly "—" instead of a silently missing row.
     rl = result.get('reaction_levels') or {}
     rs, rr = rl.get('support'), rl.get('resistance')
-    if rs or rr:
-        x1, x2 = st.columns(2)
-        if rs:
-            x1.metric('Reaction Support', f"${rs['level']:.2f}",
-                      delta=f"{rs['distance_pct']:+.2f}% · {', '.join(rs['sources'])}",
-                      delta_color='off')
-        else:
-            x1.metric('Reaction Support', '—')
-        if rr:
-            x2.metric('Reaction Resistance', f"${rr['level']:.2f}",
-                      delta=f"{rr['distance_pct']:+.2f}% · {', '.join(rr['sources'])}",
-                      delta_color='off')
-        else:
-            x2.metric('Reaction Resistance', '—')
+    x1, x2 = st.columns(2)
+    if rs:
+        x1.metric('Reaction Support', f"${rs['level']:.2f}",
+                  delta=f"{rs['distance_pct']:+.2f}% · {', '.join(rs['sources'])}",
+                  delta_color='off')
+    else:
+        x1.metric('Reaction Support', '—', delta='no defended level below',
+                  delta_color='off')
+    if rr:
+        x2.metric('Reaction Resistance', f"${rr['level']:.2f}",
+                  delta=f"{rr['distance_pct']:+.2f}% · {', '.join(rr['sources'])}",
+                  delta_color='off')
+    else:
+        x2.metric('Reaction Resistance', '—', delta='no defended level above',
+                  delta_color='off')
 
     # ── Estimated Close (dealer pin) — item 4 ──────────────────────────────
     # Where dealers are incentivized to settle price into expiry so the most
