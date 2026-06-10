@@ -2488,20 +2488,36 @@ elif page == '🔬 Fractal & Options':
                         except Exception:
                             _lh['ts_et'] = _lh['timestamp']
                         _lh = _lh.dropna(subset=['ts_et']).sort_values('ts_et')
-                        # Clip to the plotted window so 1D shows today's runs
-                        # and 1W the week's.
+                        # Window selection. A run from BEFORE the visible
+                        # window (last night's post-close call, the weekend's
+                        # last run) is still the live level when the session
+                        # opens — carry the latest one in, pinned to the left
+                        # edge, exactly like an overnight level print. Runs
+                        # after the last bar (tonight's after-hours analyses)
+                        # pin to the right edge. Everything else lands at its
+                        # own timestamp along the axis.
                         _x_lo, _x_hi = _amdf.index.min(), _amdf.index.max()
-                        _lh = _lh[(_lh['ts_et'] >= _x_lo - pd.Timedelta(hours=1))
-                                  & (_lh['ts_et'] <= _x_hi + pd.Timedelta(hours=1))]
+                        _pre = _lh[_lh['ts_et'] < _x_lo]
+                        _lh = _lh[(_lh['ts_et'] >= _x_lo)
+                                  & (_lh['ts_et'] <= _x_hi + pd.Timedelta(hours=6))]
+                        if not _pre.empty:
+                            _lh = pd.concat([_pre.tail(1), _lh])
+                        _lh['x_pos'] = _lh['ts_et'].clip(lower=_x_lo, upper=_x_hi)
                     if not _lh.empty:
                         # Milk-style: each run's level is its own horizontal
-                        # segment anchored AT the run's timestamp and extended
-                        # until the next run supersedes it (the latest one runs
-                        # to the chart edge), with a small price tag boxed at
-                        # the anchor — so the chart reads "this floor/ceiling
-                        # was called at this time," exactly like the Yellowbox
-                        # level prints.
+                        # segment anchored AT the run's position on the axis
+                        # and extended until the next run supersedes it (the
+                        # latest one runs to the chart edge), with a small
+                        # price tag boxed at the anchor — so the chart reads
+                        # "this floor/ceiling was called at this time," like
+                        # the Yellowbox level prints. Labels are thinned by
+                        # x-distance: when several runs land at (nearly) the
+                        # same axis position — e.g. a burst of after-hours
+                        # re-analyses all pinned to the chart edge — only the
+                        # LATEST of the cluster keeps its tag, so boxes never
+                        # stack. Their segments still draw and carry hovers.
                         _x_end = _amdf.index.max()
+                        _min_gap = (_x_hi - _x_lo) * 0.05   # 5% of axis span
                         for _col, _color, _txt_color, _label in (
                             ('floor', 'rgba(38,166,154,0.55)', '#26a69a', 'Floor'),
                             ('ceiling', 'rgba(239,83,80,0.55)', '#ef5350', 'Ceiling'),
@@ -2509,31 +2525,44 @@ elif page == '🔬 Fractal & Options':
                             _pts = _lh.dropna(subset=[_col])
                             if _pts.empty:
                                 continue
-                            _times = list(_pts['ts_et'])
+                            _times = list(_pts['x_pos'])
                             _vals = list(_pts[_col])
-                            _xs, _ys = [], []
+                            # Pick which runs get a price tag: the level must
+                            # have moved vs the prior run, and later tags win
+                            # any spot on the axis (walk newest→oldest, drop a
+                            # tag landing within _min_gap of one already kept).
+                            _cand = []
                             _prev_val = None
+                            for _i, _v in enumerate(_vals):
+                                if _prev_val is None or abs(_v - _prev_val) >= 0.01:
+                                    _cand.append(_i)
+                                _prev_val = _v
+                            _tag_idx, _kept_x = [], []
+                            for _i in reversed(_cand):
+                                if all(abs(_times[_i] - _kx) >= _min_gap
+                                       for _kx in _kept_x):
+                                    _tag_idx.append(_i)
+                                    _kept_x.append(_times[_i])
+                            _xs, _ys = [], []
                             for _i, (_t0, _v) in enumerate(zip(_times, _vals)):
                                 _t1 = _times[_i + 1] if _i + 1 < len(_times) else _x_end
                                 _y = _am_ax(_v)
                                 # Disconnected segments (None gap = no vertical joins)
                                 _xs += [_t0, _t1, None]
                                 _ys += [_y, _y, None]
-                                # Price tag at the anchor time — only when the
-                                # level actually moved, so reruns at an
-                                # unchanged level don't stack duplicate boxes.
-                                if _prev_val is None or abs(_v - _prev_val) >= 0.01:
+                                if _i in _tag_idx:
+                                    _at_right = (_x_hi - _t0) < _min_gap
                                     fig_am.add_annotation(
                                         x=_t0, y=_y, xref='x', yref='y',
                                         text=f"{_label} {_v:,.2f}",
-                                        showarrow=False, xanchor='left',
+                                        showarrow=False,
+                                        xanchor='right' if _at_right else 'left',
                                         yanchor='bottom' if _col == 'ceiling' else 'top',
                                         font=dict(color=_txt_color, size=10),
                                         bgcolor='rgba(14,17,23,0.75)',
                                         bordercolor=_color, borderwidth=1,
                                         borderpad=2,
                                     )
-                                _prev_val = _v
                             fig_am.add_trace(go.Scatter(
                                 x=_xs, y=_ys, mode='lines',
                                 name=f'{_label} @ run', showlegend=False,
