@@ -99,6 +99,24 @@ CONFIDENCE_SIGMAS = {
     '2sigma':   2.0,            # ~95.4% probability
 }
 
+# ── Level-Snap Floor/Ceiling (Fractal-Exchange/MM-tool style) ───────────
+# The primary floor/ceiling snaps toward the strongest *confluent* level —
+# a price where independent evidence sources (per-strike GEX, OI walls,
+# neural zones, fractal pivots, vectors) agree — instead of staying a
+# symmetric IV band around spot. The sigma envelope in `ranges` is untouched.
+LEVEL_SNAP_TOLERANCE_PCT = 0.4  # cluster half-width (% of spot) for two levels to "agree"
+LEVEL_SNAP_MIN_SIGMA = 0.35     # ignore levels closer to spot than this (in final-move sigmas)
+LEVEL_SNAP_MAX_SIGMA = 1.60     # ignore levels farther from spot than this
+LEVEL_SNAP_BLEND_BASE = 0.50    # weight on the level when one source backs it
+LEVEL_SNAP_BLEND_STEP = 0.15    # extra weight per additional independent source
+LEVEL_SNAP_BLEND_MAX = 0.85     # never fully abandon the calibrated IV band edge
+
+# Dealer-pin bracket gate: structure (fractals/neurals/vectors) closer to spot
+# than this many daily expected moves cannot tighten the pin bracket — a
+# trendline running through current price would otherwise glue the estimated
+# close to spot all session.
+PIN_BRACKET_MIN_SIGMA = 0.35
+
 # ── Chart Indicators ────────────────────────────────────────────────────
 VWAP_WINDOW = 20                # Rolling window for daily VWAP
 ZSCORE_WINDOW = 50              # Lookback for Z-score calculation

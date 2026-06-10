@@ -11,7 +11,7 @@ as part of the wider offline suite.
 """
 import pandas as pd
 
-from strategies.fractal_options import compute_dealer_pin_close
+from strategies.fractal_options import compute_dealer_pin_close, compute_max_pain
 
 
 SPOT = 600.0
@@ -98,3 +98,56 @@ def test_handles_zero_expected_move_without_dividing_by_zero():
 
     assert out['estimated_close'] > 0
     assert isinstance(out['confidence'], float)
+
+
+def test_session_open_anchor_decouples_estimate_from_live_spot():
+    """With a fixed anchor, intraday spot drift must not re-center the pull.
+
+    Same positioning, two different live spots: anchored estimates differ only
+    through the (spot-based) reachability clamp — here both are reachable, so
+    they are identical. Unanchored they re-center on each spot.
+    """
+    gex = _gex([(596, -2e8), (600, 5e8), (603, 9e8), (606, 3e8)])
+    a = compute_dealer_pin_close(600.0, 601.0, gex, FRACTALS, IV_RANGE,
+                                 'transitional', anchor_price=600.0)
+    b = compute_dealer_pin_close(602.0, 601.0, gex, FRACTALS, IV_RANGE,
+                                 'transitional', anchor_price=600.0)
+    assert a['estimated_close'] == b['estimated_close']
+    assert a['anchor_source'] == 'session_open'
+
+    ua = compute_dealer_pin_close(600.0, 601.0, gex, FRACTALS, IV_RANGE, 'transitional')
+    ub = compute_dealer_pin_close(602.0, 601.0, gex, FRACTALS, IV_RANGE, 'transitional')
+    assert ua['estimated_close'] != ub['estimated_close']
+    assert ua['anchor_source'] == 'spot'
+
+
+def test_anchored_estimate_still_respects_reachability_from_spot():
+    """The anchor moves the pull origin, not the physics: the estimate stays
+    inside spot ± expected move."""
+    gex = _gex([(610, 4e8), (615, 9e8)])
+    out = compute_dealer_pin_close(SPOT, 615.0, gex, FRACTALS, IV_RANGE,
+                                   'choppy', anchor_price=608.0)
+    assert out['estimated_close'] <= SPOT + IV_RANGE['expected_move_1sigma'] + 1e-6
+
+
+def test_max_pain_prefers_volume_on_request():
+    """0DTE chains carry stale overnight OI; prefer_volume weights today's flow.
+
+    OI concentrates at 605, today's volume at 595 — default max pain follows
+    OI, the 0DTE path follows volume.
+    """
+    calls = pd.DataFrame({'strike': [595.0, 605.0],
+                          'openInterest': [0, 50000], 'volume': [40000, 0]})
+    puts = pd.DataFrame({'strike': [595.0, 605.0],
+                         'openInterest': [0, 50000], 'volume': [40000, 0]})
+
+    assert compute_max_pain(calls, puts, 600.0) == 605.0
+    assert compute_max_pain(calls, puts, 600.0, prefer_volume=True) == 595.0
+
+
+def test_max_pain_prefer_volume_falls_back_to_oi_when_no_volume():
+    calls = pd.DataFrame({'strike': [595.0, 605.0],
+                          'openInterest': [0, 50000], 'volume': [0, 0]})
+    puts = pd.DataFrame({'strike': [595.0, 605.0],
+                         'openInterest': [0, 50000], 'volume': [0, 0]})
+    assert compute_max_pain(calls, puts, 600.0, prefer_volume=True) == 605.0

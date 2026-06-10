@@ -30,6 +30,9 @@ from config import (
     DEALER_BOUND_BLEND, CONFIDENCE_SIGMAS,
     NEURAL_TOLERANCE_PCT, NEURAL_LOOKBACK, VECTOR_MAX_AGE,
     NEURAL_BRACKET_MIN_STRENGTH,
+    LEVEL_SNAP_TOLERANCE_PCT, LEVEL_SNAP_MIN_SIGMA, LEVEL_SNAP_MAX_SIGMA,
+    LEVEL_SNAP_BLEND_BASE, LEVEL_SNAP_BLEND_STEP, LEVEL_SNAP_BLEND_MAX,
+    PIN_BRACKET_MIN_SIGMA,
 )
 from options_fetcher import fetch_options_chain, fetch_expiration_dates
 from sheets_logger import pacific_now
@@ -364,14 +367,21 @@ def compute_max_pain(
     calls: pd.DataFrame,
     puts: pd.DataFrame,
     spot: float = 0.0,
+    prefer_volume: bool = False,
 ) -> float:
     """
     Max pain: the strike where total options expire with minimum value.
 
     Uses openInterest when available, falls back to volume.
+    `prefer_volume=True` flips that priority — on a same-day (0DTE) chain the
+    OI is the *overnight* settle and misses everything opened today, so the
+    session's traded volume is the honest weight; OI remains the fallback.
     Returns spot price if no activity data is available.
     """
-    col = _pick_activity_col(pd.concat([calls, puts], ignore_index=True))
+    combined = pd.concat([calls, puts], ignore_index=True)
+    col = _pick_activity_col(combined)
+    if prefer_volume and 'volume' in combined.columns and combined['volume'].sum() > 0:
+        col = 'volume'
 
     calls_active = calls[calls[col] > 0] if col in calls.columns else calls
     puts_active = puts[puts[col] > 0] if col in puts.columns else puts
@@ -588,8 +598,171 @@ def _compute_bias(signals):
     return bias, confidence
 
 
+def _collect_level_candidates(spot, side, gex_df=None, walls=None,
+                              neurals=None, fractal_levels=None, vectors=None):
+    """
+    Gather concrete price levels on one side of spot, tagged by evidence source.
+
+    side='floor'   → levels at/below spot (support candidates)
+    side='ceiling' → levels at/above spot (resistance candidates)
+
+    Sources (the MM-tool reading: dealer positioning first, structure second):
+      'gex'     — top per-strike |net GEX| strikes (dealer hedging flips there)
+      'oi_wall' — highest-activity OI strikes
+      'neural'  — multi-bounce horizontal zones (strength-gated)
+      'fractal' — recent Williams pivot levels
+      'vector'  — active sloped S/R line projected to today
+
+    Returns a list of (price, source) tuples.
+    """
+    below = side == 'floor'
+    out = []
+
+    if gex_df is not None and not gex_df.empty and 'net_gex' in gex_df.columns:
+        sub = gex_df[gex_df['strike'] < spot] if below else gex_df[gex_df['strike'] > spot]
+        sub = sub[sub['net_gex'].abs() > 0]
+        if not sub.empty:
+            top = sub.reindex(sub['net_gex'].abs().nlargest(3).index)
+            out.extend((float(s), 'gex') for s in top['strike'])
+
+    if walls:
+        wl = walls.get('put_walls' if below else 'call_walls') or []
+        for strike, _ in sorted(wl, key=lambda w: w[1], reverse=True)[:3]:
+            out.append((float(strike), 'oi_wall'))
+
+    if neurals:
+        zones = neurals.get('support_zones' if below else 'resistance_zones') or []
+        eligible = [z for z in zones
+                    if z.get('strength', 0) >= NEURAL_BRACKET_MIN_STRENGTH
+                    and ((z['center'] <= spot) if below else (z['center'] >= spot))]
+        out.extend((float(z['center']), 'neural') for z in eligible[:3])
+
+    if fractal_levels:
+        lv = fractal_levels.get('support_levels' if below else 'resistance_levels') or []
+        prices = [p for _, p in lv if ((p <= spot) if below else (p >= spot))]
+        out.extend((float(p), 'fractal') for p in prices[:3])
+
+    if vectors:
+        v = vectors.get('support_vector' if below else 'resistance_vector')
+        want_role = 'support' if below else 'resistance'
+        if v and v.get('role') == want_role and v.get('current_value'):
+            val = float(v['current_value'])
+            if (val < spot) if below else (val > spot):
+                out.append((val, 'vector'))
+
+    return out
+
+
+def _cluster_candidates(candidates):
+    """
+    Greedy 1-D clustering of (price, source) candidates — same scheme as
+    fractal_indicators.cluster_levels but carrying the source tag of every
+    member. Returns [{'center', 'members', 'sources'}, ...] sorted ascending.
+    """
+    clusters = []
+    for p, src in sorted(candidates):
+        if clusters and abs(p - clusters[-1]['center']) <= clusters[-1]['center'] * LEVEL_SNAP_TOLERANCE_PCT / 100.0:
+            c = clusters[-1]
+            c['members'].append((p, src))
+            c['center'] = sum(m for m, _ in c['members']) / len(c['members'])
+        else:
+            clusters.append({'center': p, 'members': [(p, src)]})
+    for c in clusters:
+        c['sources'] = sorted({s for _, s in c['members']})
+    return clusters
+
+
+# Evidence sources that count as "defended" on their own: a per-strike GEX
+# magnet and an OI wall are dealer commitments, and a neural zone is by
+# construction a multi-test level. A lone fractal pivot or vector only counts
+# when something else clusters with it.
+_DEFENDED_SINGLETON_SOURCES = {'gex', 'oi_wall', 'neural'}
+
+
+def nearest_reaction_levels(spot, gex_df=None, walls=None, neurals=None,
+                            fractal_levels=None, vectors=None):
+    """
+    First *defended* level above and below spot, regardless of distance —
+    the trader's-eye readout ("where does the tape react next?"), as opposed
+    to the floor/ceiling containment range. A cluster is defended when ≥2
+    independent sources agree on it, or when a single inherently multi-test
+    source (GEX strike, OI wall, neural zone) backs it.
+
+    Returns {'support': {...} | None, 'resistance': {...} | None} with
+    level, sources, n_members, distance, distance_pct.
+    """
+    out = {}
+    for side, key in (('floor', 'support'), ('ceiling', 'resistance')):
+        cands = _collect_level_candidates(
+            spot, side, gex_df=gex_df, walls=walls, neurals=neurals,
+            fractal_levels=fractal_levels, vectors=vectors)
+        defended = [
+            c for c in _cluster_candidates(cands)
+            if len(c['sources']) >= 2 or set(c['sources']) & _DEFENDED_SINGLETON_SOURCES
+        ]
+        if defended:
+            best = min(defended, key=lambda c: abs(c['center'] - spot))
+            out[key] = {
+                'level': round(best['center'], 2),
+                'sources': best['sources'],
+                'n_members': len(best['members']),
+                'distance': round(best['center'] - spot, 2),
+                'distance_pct': round((best['center'] - spot) / spot * 100, 2) if spot else None,
+            }
+        else:
+            out[key] = None
+    return out
+
+
+def _snap_level(spot, raw_edge, final_move, candidates, side):
+    """
+    Pick the strongest confluent level inside the snap window and blend the
+    raw 1-sigma band edge toward it.
+
+    Window: LEVEL_SNAP_MIN_SIGMA..LEVEL_SNAP_MAX_SIGMA final-moves from spot —
+    a "floor" sitting on top of spot is noise, and one beyond ~1.6 sigma is a
+    worse estimate than the calibrated band. Candidates within
+    LEVEL_SNAP_TOLERANCE_PCT of each other cluster into one level; clusters
+    rank by how many *independent* sources back them (the Fractal-Exchange
+    confluence idea), then member count, then proximity to the band edge.
+
+    Returns None (keep the band edge) or
+    {'level', 'snapped', 'blend', 'sources', 'n_members'}.
+    """
+    if final_move <= 0 or not candidates:
+        return None
+
+    below = side == 'floor'
+    near = spot - LEVEL_SNAP_MIN_SIGMA * final_move if below else spot + LEVEL_SNAP_MIN_SIGMA * final_move
+    far = spot - LEVEL_SNAP_MAX_SIGMA * final_move if below else spot + LEVEL_SNAP_MAX_SIGMA * final_move
+    lo, hi = (far, near) if below else (near, far)
+    in_window = [(p, s) for p, s in candidates if lo <= p <= hi]
+    if not in_window:
+        return None
+
+    clusters = _cluster_candidates(in_window)
+    best = max(clusters, key=lambda c: (
+        len(c['sources']),
+        len(c['members']),
+        -abs(c['center'] - raw_edge),
+    ))
+    sources = best['sources']
+    blend = min(LEVEL_SNAP_BLEND_MAX,
+                LEVEL_SNAP_BLEND_BASE + LEVEL_SNAP_BLEND_STEP * (len(sources) - 1))
+    snapped = raw_edge * (1 - blend) + best['center'] * blend
+
+    return {
+        'level': round(best['center'], 2),
+        'snapped': round(snapped, 2),
+        'blend': round(blend, 2),
+        'sources': sources,
+        'n_members': len(best['members']),
+    }
+
+
 def _compute_floor_ceiling(
     spot, iv_range, vrp, vix_term, gex_bounds, walls, regime, fractal_dim,
+    gex_df=None, neurals=None, fractal_levels=None, vectors=None,
 ):
     """
     Evidence-based floor/ceiling computation.
@@ -600,6 +773,12 @@ def _compute_floor_ceiling(
       3. REGIME: Widen/narrow via fractal dimension + VIX term structure
       4. BOUND: Cap at GEX clusters + OI wall boundaries
       5. OUTPUT: Multiple confidence levels (68%, 87%, 95%)
+      6. SNAP: pull the primary floor/ceiling toward the strongest confluent
+         dealer/structure level (per-strike GEX, OI walls, neural zones,
+         fractal pivots, vectors) inside the snap window — floors and
+         ceilings live at actual defended strikes, not at a symmetric
+         distance from spot. The multi-sigma `ranges` envelope stays pure
+         band math (range_calibration parity).
     """
     # Step 1: Base daily move from IV
     base_move = iv_range.get('daily_expected_move', spot * 0.01)
@@ -663,9 +842,24 @@ def _compute_floor_ceiling(
         }
 
     primary = ranges['1sigma']
+
+    # Step 6: snap the primary floor/ceiling to confluent evidence levels.
+    floor_basis = _snap_level(
+        spot, primary['floor'], final_move,
+        _collect_level_candidates(spot, 'floor', gex_df=gex_df, walls=walls,
+                                  neurals=neurals, fractal_levels=fractal_levels,
+                                  vectors=vectors),
+        'floor')
+    ceiling_basis = _snap_level(
+        spot, primary['ceiling'], final_move,
+        _collect_level_candidates(spot, 'ceiling', gex_df=gex_df, walls=walls,
+                                  neurals=neurals, fractal_levels=fractal_levels,
+                                  vectors=vectors),
+        'ceiling')
+
     return {
-        'floor': primary['floor'],
-        'ceiling': primary['ceiling'],
+        'floor': floor_basis['snapped'] if floor_basis else primary['floor'],
+        'ceiling': ceiling_basis['snapped'] if ceiling_basis else primary['ceiling'],
         'ranges': ranges,
         'methodology': {
             'base_move': round(base_move, 2),
@@ -677,6 +871,8 @@ def _compute_floor_ceiling(
             'final_move': round(final_move, 2),
             'dealer_floor': round(dealer_floor, 2),
             'dealer_ceiling': round(dealer_ceil, 2),
+            'floor_basis': floor_basis,
+            'ceiling_basis': ceiling_basis,
         },
     }
 
@@ -690,6 +886,7 @@ def compute_dealer_pin_close(
     regime: str,
     neurals: dict = None,
     vectors: dict = None,
+    anchor_price: Optional[float] = None,
 ) -> dict:
     """
     Estimate where dealers are incentivized to pin the underlying into expiry —
@@ -710,6 +907,12 @@ def compute_dealer_pin_close(
       3. Bracket the result inside the nearest fractal support/resistance and
          the IV-implied 1-sigma expected-move envelope (a pin the tape cannot
          physically reach by the close is not a realistic close).
+
+    `anchor_price` (optional): start the pull from a fixed session reference
+    (e.g. today's open) instead of the live spot. Re-running the analysis
+    intraday then re-reads dealer positioning without re-centering the
+    estimate on wherever price happens to be at that moment — the forecast
+    stops chasing the tape. Reachability is still judged from the live spot.
     """
     daily_em = iv_range.get('daily_expected_move') or (spot * 0.01)
     horizon_em = iv_range.get('expected_move_1sigma') or daily_em
@@ -736,34 +939,46 @@ def compute_dealer_pin_close(
     else:
         pin_target = max_pain
 
-    # 3. Pull fraction from spot toward the pin by the close.
+    # 3. Pull fraction from the anchor toward the pin by the close. The anchor
+    #    is the live spot unless the caller pinned it to a session reference.
+    anchor = spot
+    anchor_source = 'spot'
+    try:
+        if anchor_price is not None and float(anchor_price) > 0:
+            anchor = float(anchor_price)
+            anchor_source = 'session_open'
+    except (TypeError, ValueError):
+        pass
     base_pull = 0.45
     gamma_adj = 0.40 * (gamma_strength - 0.5) * 2.0  # -0.40 .. +0.40
     regime_adj = {'choppy': 0.15, 'transitional': 0.0, 'trending': -0.20}.get(regime, 0.0)
     pull = max(0.0, min(0.85, base_pull + gamma_adj + regime_adj))
-    estimate = spot + pull * (pin_target - spot)
+    estimate = anchor + pull * (pin_target - anchor)
 
-    # 4. Bracket by nearest fractal structure + the expected-move envelope.
+    # 4. Bracket by nearby fractal structure + the expected-move envelope.
     #    Strong NEURAL zones and the active VECTORS (Fractal-Exchange-style
     #    structure) tighten the bracket when present: a close that would have to
     #    blow through a level that has rejected price repeatedly is not the most
     #    likely pin. All of these only ever *tighten* the envelope, never widen
-    #    past spot ± expected move.
+    #    past spot ± expected move. Structure inside `min_gap` of spot is
+    #    ignored — a trendline running through current price says nothing about
+    #    the close and used to clamp the estimate onto spot.
+    min_gap = PIN_BRACKET_MIN_SIGMA * daily_em
     sup = (fractal_levels.get('support_levels') or [[None, None]])[0][1]
     res = (fractal_levels.get('resistance_levels') or [[None, None]])[0][1]
     lo_bounds = [spot - horizon_em]
     hi_bounds = [spot + horizon_em]
-    if sup is not None and sup < spot:
+    if sup is not None and sup <= spot - min_gap:
         lo_bounds.append(sup)
-    if res is not None and res > spot:
+    if res is not None and res >= spot + min_gap:
         hi_bounds.append(res)
 
     if neurals:
         ns = nearest_neural(neurals.get('support_zones'), spot, 'support')
         nr = nearest_neural(neurals.get('resistance_zones'), spot, 'resistance')
-        if ns and ns.get('strength', 0) >= NEURAL_BRACKET_MIN_STRENGTH and ns['center'] < spot:
+        if ns and ns.get('strength', 0) >= NEURAL_BRACKET_MIN_STRENGTH and ns['center'] <= spot - min_gap:
             lo_bounds.append(ns['center'])
-        if nr and nr.get('strength', 0) >= NEURAL_BRACKET_MIN_STRENGTH and nr['center'] > spot:
+        if nr and nr.get('strength', 0) >= NEURAL_BRACKET_MIN_STRENGTH and nr['center'] >= spot + min_gap:
             hi_bounds.append(nr['center'])
 
     if vectors:
@@ -776,9 +991,9 @@ def compute_dealer_pin_close(
             # floor, a capping resistance vector as a ceiling.
             if cv is None:
                 continue
-            if v.get('role') == 'support' and cv < spot:
+            if v.get('role') == 'support' and cv <= spot - min_gap:
                 lo_bounds.append(cv)
-            elif v.get('role') == 'resistance' and cv > spot:
+            elif v.get('role') == 'resistance' and cv >= spot + min_gap:
                 hi_bounds.append(cv)
 
     lo = max(lo_bounds)   # tightest floor at/below spot
@@ -804,6 +1019,8 @@ def compute_dealer_pin_close(
         'gamma_pin_strike': round(pin_strike, 2) if pin_strike is not None else None,
         'gamma_strength': round(gamma_strength, 2),
         'gamma_regime': 'positive (sticky / pin)' if gamma_strength > 0.5 else 'negative (slippery / drift)',
+        'anchor_price': round(anchor, 2),
+        'anchor_source': anchor_source,
         'pull_fraction': round(pull, 2),
         'drift_from_spot': round(drift, 2),
         'drift_pct': round((drift / spot * 100.0), 2) if spot else 0.0,
@@ -904,7 +1121,14 @@ def compute_composite_analysis(
     # 4. Options analytics
     gex_df = compute_gex_profile(calls, puts, spot, expiry_used)
     walls = compute_options_walls(calls, puts, spot)
-    max_pain_strike = compute_max_pain(calls, puts, spot)
+    # On a same-day chain, weight max pain by today's volume instead of the
+    # stale overnight OI (0DTE opens are invisible in OI until the next settle).
+    try:
+        from options_fetcher import _now_et
+        _is_0dte = datetime.strptime(str(expiry_used)[:10], '%Y-%m-%d').date() <= _now_et().date()
+    except (ValueError, TypeError, ImportError):
+        _is_0dte = False
+    max_pain_strike = compute_max_pain(calls, puts, spot, prefer_volume=_is_0dte)
     iv_range = compute_iv_expected_move(calls, puts, spot, expiry_used, vix_fallback=vix_value)
     pc_ratios = compute_put_call_ratios(calls, puts)
     skew = compute_iv_skew(calls, puts, spot)
@@ -1009,19 +1233,40 @@ def compute_composite_analysis(
     fc_result = _compute_floor_ceiling(
         spot=spot, iv_range=iv_range, vrp=vrp, vix_term=vix_term,
         gex_bounds=gex_bounds, walls=walls, regime=regime, fractal_dim=current_fd,
+        gex_df=gex_df, neurals=neurals, fractal_levels=fractal_levels,
+        vectors=vectors,
     )
     floor = fc_result['floor']
     ceiling = fc_result['ceiling']
 
     # 6b. Dealer-pin estimated close — where dealers are incentivized to pin
     #     price into expiry (most OI expires OTM), shaped by fractal structure.
+    #     Anchor the pull on TODAY'S OPEN when the daily bar is today's, so
+    #     intraday re-runs refresh dealer positioning without re-centering the
+    #     forecast on the live price (the estimate used to chase spot all day).
+    pin_anchor = None
+    try:
+        if df.index[-1].date() == pacific_now().date():
+            _open = float(df['Open'].iloc[-1])
+            if _open > 0:
+                pin_anchor = _open
+    except (IndexError, KeyError, TypeError, ValueError):
+        pass
     pin_close = compute_dealer_pin_close(
         spot=spot, max_pain=max_pain_strike, gex_df=gex_df,
         fractal_levels=fractal_levels, iv_range=iv_range, regime=regime,
-        neurals=neurals, vectors=vectors,
+        neurals=neurals, vectors=vectors, anchor_price=pin_anchor,
     )
 
-    # 6c. Confluence read — how many independent structural/flow signals align at
+    # 6c. Nearest reaction levels — first defended level above/below spot,
+    #     regardless of distance (trader's-eye view, distinct from the
+    #     floor/ceiling containment range).
+    reaction_levels = nearest_reaction_levels(
+        spot, gex_df=gex_df, walls=walls, neurals=neurals,
+        fractal_levels=fractal_levels, vectors=vectors,
+    )
+
+    # 6d. Confluence read — how many independent structural/flow signals align at
     #     the current price (Fractal-Exchange "high-probability" stack).
     confluence = confluence_score(
         spot=spot, vectors=vectors, neurals=neurals,
@@ -1058,7 +1303,7 @@ def compute_composite_analysis(
     pin_close_display = dict(pin_close)
     if proxy_used and price_ratio > 1:
         for k in ('estimated_close', 'estimate_low', 'estimate_high',
-                  'pin_target', 'max_pain', 'gamma_pin_strike'):
+                  'pin_target', 'max_pain', 'gamma_pin_strike', 'anchor_price'):
             if pin_close_display.get(k) is not None:
                 pin_close_display[k] = round(pin_close_display[k] * price_ratio, 2)
         pin_close_display['drift_from_spot'] = round(
@@ -1068,6 +1313,16 @@ def compute_composite_analysis(
     # dashboard shows them on the same axis as the displayed (futures) price.
     def _scale_price(v):
         return round(v * price_ratio, 2) if (proxy_used and price_ratio > 1 and v is not None) else v
+
+    reaction_display = reaction_levels
+    if proxy_used and price_ratio > 1:
+        reaction_display = {}
+        for k, lvl in reaction_levels.items():
+            if lvl:
+                reaction_display[k] = dict(lvl, level=_scale_price(lvl['level']),
+                                           distance=_scale_price(lvl['distance']))
+            else:
+                reaction_display[k] = None
 
     neurals_display = neurals
     vectors_display = vectors
@@ -1132,6 +1387,8 @@ def compute_composite_analysis(
         'put_call_ratios': pc_ratios,
         'iv_skew': skew,
         'fractal_levels': fractal_levels,
+        # First defended level above/below spot, regardless of distance.
+        'reaction_levels': reaction_display,
         # Fractal-Exchange-style structure (item 4 extension).
         'neural_zones': neurals_display,
         'vectors': vectors_display,
