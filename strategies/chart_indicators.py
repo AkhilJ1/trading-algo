@@ -581,12 +581,22 @@ def compute_opportunity_scan(df: pd.DataFrame) -> list:
 
 def compute_strategy_consensus(df: pd.DataFrame) -> dict:
     """
-    Run all available strategies and return their latest signal.
-    Returns dict of strategy_name → signal (+1, -1, 0) and summary.
+    Run all available strategies and return each one's CURRENT STATE vote.
+
+    Voters must vote their standing state (long/short bias right now), not
+    the last bar of an entry/exit event column. The old version read
+    `strategy_signal.iloc[-1]` for MACD+RSI / BB Squeeze / Turtle — an event
+    column that is 0 on almost every bar — so those three voters were
+    structurally mute and the verdict was left to the two slow trend
+    followers (MA Cross, TSMOM) that stay bullish for months. Result: the
+    consensus read bullish/mixed nearly always and a 3-vote bearish was
+    practically unreachable.
+
+    Returns dict of strategy_name → vote (+1, -1, 0) and summary.
     """
     signals = {}
 
-    # 1. MA Crossover
+    # 1. MA Crossover — trend state (golden vs death cross regime).
     try:
         from strategies.ma_crossover import current_signal as ma_current_signal
         ma = ma_current_signal(df)
@@ -594,7 +604,7 @@ def compute_strategy_consensus(df: pd.DataFrame) -> dict:
     except Exception:
         signals['MA Cross'] = 0
 
-    # 2. RSI + BB
+    # 2. RSI + BB — votes only at extremes (oversold buy setup / overbought).
     try:
         from strategies.rsi_bollinger import get_buy_signal
         rsi_bb = get_buy_signal(df)
@@ -607,23 +617,26 @@ def compute_strategy_consensus(df: pd.DataFrame) -> dict:
     except Exception:
         signals['RSI+BB'] = 0
 
-    # 3. MACD + RSI
+    # 3. MACD + RSI — state: MACD line above/below its signal line now.
     try:
         from strategies.macd_rsi import generate_signals
         sig_df = generate_signals(df)
-        signals['MACD+RSI'] = int(sig_df['strategy_signal'].iloc[-1])
+        macd_gap = float(sig_df['MACD'].iloc[-1] - sig_df['MACD_signal'].iloc[-1])
+        signals['MACD+RSI'] = 1 if macd_gap > 0 else (-1 if macd_gap < 0 else 0)
     except Exception:
         signals['MACD+RSI'] = 0
 
-    # 4. BB Squeeze
+    # 4. BB Squeeze — state: price above/below the squeeze midline (its own
+    #    exit line), the side that decides whether a breakout is still alive.
     try:
         from strategies.bb_squeeze import generate_signals
         sig_df = generate_signals(df)
-        signals['BB Squeeze'] = int(sig_df['strategy_signal'].iloc[-1])
+        gap = float(sig_df['Close'].iloc[-1] - sig_df['BB_SQ_mid'].iloc[-1])
+        signals['BB Squeeze'] = 1 if gap > 0 else (-1 if gap < 0 else 0)
     except Exception:
         signals['BB Squeeze'] = 0
 
-    # 5. TSMOM
+    # 5. TSMOM — already a per-bar state (sign of blended momentum).
     try:
         from strategies.tsmom import generate_signals
         sig_df = generate_signals(df)
@@ -631,22 +644,31 @@ def compute_strategy_consensus(df: pd.DataFrame) -> dict:
     except Exception:
         signals['TSMOM'] = 0
 
-    # 6. Turtle
+    # 6. Turtle — replay the entry/exit events into a standing state:
+    #    +1 while in a breakout position, -1 after a 20-day-low breakdown
+    #    (genuinely bearish), 0 before the first event.
     try:
         from strategies.turtle import generate_signals
         sig_df = generate_signals(df)
-        signals['Turtle'] = int(sig_df['strategy_signal'].iloc[-1])
+        state = 0
+        for v in sig_df['strategy_signal'].values:
+            if v == 1:
+                state = 1
+            elif v == -1:
+                state = -1
+        signals['Turtle'] = state
     except Exception:
         signals['Turtle'] = 0
 
-    # Summary
+    # Summary — needs 3+ votes AND a strict majority over the other side, so
+    # a 3-3 split can never read as a directional consensus.
     bullish = sum(1 for v in signals.values() if v > 0)
     bearish = sum(1 for v in signals.values() if v < 0)
     total = len(signals)
 
-    if bullish >= 3:
+    if bullish >= 3 and bullish > bearish:
         consensus = 'bullish'
-    elif bearish >= 3:
+    elif bearish >= 3 and bearish > bullish:
         consensus = 'bearish'
     else:
         consensus = 'mixed'
