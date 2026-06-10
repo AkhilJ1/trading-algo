@@ -1953,7 +1953,7 @@ elif page == '🔬 Fractal & Options':
     # sidebar says Schwab is configured but this reads 'yfinance', the Schwab
     # chain call fell back (the thing to investigate), so never hide it.
     _chain_src = str(result.get('source', '?'))
-    _analysis_note = (f"Expiry: {result['expiry']}  |  Analyzed: {result['timestamp']}"
+    _analysis_note = (f"Expiry: {result['expiry']}  |  Analyzed: {result['timestamp']} PT"
                       f"  |  Chain via: {_chain_src}"
                       f"  |  Anchored on {_src_label}")
     _price_delta = _live_price - _analyzed_spot
@@ -2331,13 +2331,22 @@ elif page == '🔬 Fractal & Options':
                 if not _clipped.empty:
                     _amdf = _clipped
 
+            # Display in PACIFIC: the feed's intraday bars are exchange (ET)
+            # stamped; shift the index -3h for plotting only (ET and PT share
+            # DST dates, so the offset is constant). Daily-fallback bars are
+            # midnight-stamped dates and must NOT shift. All window/session
+            # logic above ran in exchange time and is already settled.
+            if _is_intraday_data and isinstance(_amdf.index, pd.DatetimeIndex):
+                _amdf = _amdf.copy()
+                _amdf.index = _amdf.index - pd.Timedelta(hours=3)
+
             with _c1:
                 if market_open:
                     _live = ('🟢 live · ~30s refresh' if _spec['intraday']
                              else '🟢 market open')
                 else:
                     _live = '⚪ market closed'
-                st.caption(f"**{_yb_range}**{_src_note} · {_live}")
+                st.caption(f"**{_yb_range}**{_src_note} · {_live} · times PT")
 
             def _am_ax(v):
                 """Convert a display/target-unit price onto the proxy plotting axis."""
@@ -2501,19 +2510,9 @@ elif page == '🔬 Fractal & Options':
                         & _lh['timestamp'].notna()
                     ].copy()
                     if not _lh.empty:
-                        # Ledger stamps are Pacific; the intraday bars plot in
-                        # naive Eastern — shift so the steps land on the axis.
-                        try:
-                            _lh['ts_et'] = (
-                                _lh['timestamp']
-                                .dt.tz_localize('America/Los_Angeles',
-                                                ambiguous='NaT',
-                                                nonexistent='NaT')
-                                .dt.tz_convert('America/New_York')
-                                .dt.tz_localize(None)
-                            )
-                        except Exception:
-                            _lh['ts_et'] = _lh['timestamp']
+                        # Ledger stamps are Pacific and the axis now plots in
+                        # Pacific too — anchor directly, no conversion.
+                        _lh['ts_et'] = _lh['timestamp']
                         _lh = _lh.dropna(subset=['ts_et']).sort_values('ts_et')
                         # Window selection — CLEAN SLATE each session: only
                         # runs from the visible window are drawn, so every
@@ -2600,7 +2599,7 @@ elif page == '🔬 Fractal & Options':
                                 name=f'{_label} @ run', showlegend=False,
                                 line=dict(color=_color, width=1.4, dash='dot'),
                                 hovertemplate=(_label
-                                               + ' %{y:.2f}<br>set %{x|%H:%M} ET'
+                                               + ' %{y:.2f}<br>set %{x|%H:%M} PT'
                                                '<extra></extra>'),
                             ))
             except Exception:
@@ -2710,9 +2709,11 @@ elif page == '🔬 Fractal & Options':
             _yb_breaks = [dict(bounds=['sat', 'mon'])]
             if _is_intraday_data and not result.get('proxy_used'):
                 if _eh_active:
-                    _yb_breaks.append(dict(bounds=[20, 4], pattern='hour'))
+                    # pre/post window 1:00am–5:00pm PT (4:00–20:00 ET)
+                    _yb_breaks.append(dict(bounds=[17, 1], pattern='hour'))
                 else:
-                    _yb_breaks.append(dict(bounds=[16, 9.5], pattern='hour'))
+                    # RTH 6:30am–1:00pm PT (9:30–16:00 ET)
+                    _yb_breaks.append(dict(bounds=[13, 6.5], pattern='hour'))
 
             fig_am.update_layout(
                 height=_yb_h, template='plotly_dark',
@@ -2797,6 +2798,10 @@ elif page == '🔬 Fractal & Options':
                     _days = sorted(set(_fs_df.index.normalize()))
                     _fs_df = _fs_df[_fs_df.index.normalize().isin(_days[-_fs_spec['sessions']:])]
                     if len(_fs_df) >= 25:    # enough bars for pivots + FD
+                        # Display in PACIFIC (feed bars are ET-stamped; the
+                        # constant -3h shift is display-only — pivot/BOS math
+                        # is positional and unaffected).
+                        _fs_df.index = _fs_df.index - pd.Timedelta(hours=3)
                         _fs_df = _fs_add_fractals(_fs_df.copy())
                         try:
                             _fs_df['fractal_dimension'] = _fs_fd(_fs_df)
@@ -3084,7 +3089,7 @@ elif page == '🔬 Fractal & Options':
         if _fs_intraday:
             fig_frac.update_xaxes(rangebreaks=[
                 dict(bounds=['sat', 'mon']),
-                dict(bounds=[16, 9.5], pattern='hour'),
+                dict(bounds=[13, 6.5], pattern='hour'),   # RTH in PT
             ])
         fig_frac.update_yaxes(gridcolor='#1e2130')
         mobilize(fig_frac, height_mobile=560)
@@ -3162,7 +3167,7 @@ elif page == '🔬 Fractal & Options':
             'Units: \\$ of dealer hedge notional per \\$1 move. Black-Scholes '
             'gamma × overnight-settled OI × 100 × spot, calls + / puts − '
             '(standard naive dealer convention). For a same-day 0DTE expiry, '
-            'gamma uses the actual time remaining to the 4:00pm ET close. '
+            'gamma uses the actual time remaining to the 1:00pm PT close. '
             'Note: OI settles once per night, so positions opened TODAY are '
             'not in today\'s GEX — true of every OI-based GEX feed.'
         )
