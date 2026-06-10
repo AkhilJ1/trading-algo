@@ -3065,6 +3065,14 @@ elif page == '🔬 Fractal & Options':
         st.subheader('Gamma Exposure (GEX) Profile')
         st.caption('Positive GEX = sticky/mean-reverting (dealers dampen moves)  |  '
                    'Negative GEX = slippery (dealers amplify moves)')
+        st.caption(
+            'Units: \\$ of dealer hedge notional per \\$1 move. Black-Scholes '
+            'gamma × overnight-settled OI × 100 × spot, calls + / puts − '
+            '(standard naive dealer convention). For a same-day 0DTE expiry, '
+            'gamma uses the actual time remaining to the 4:00pm ET close. '
+            'Note: OI settles once per night, so positions opened TODAY are '
+            'not in today\'s GEX — true of every OI-based GEX feed.'
+        )
         gex_df = result['gex_df']
         if gex_df is not None and not gex_df.empty:
             fig_gex = go.Figure()
