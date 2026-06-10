@@ -244,16 +244,33 @@ def test_weak_neural_does_not_constrain():
 
 
 def test_held_support_vector_floors_the_pin():
-    # Pin would drift down toward max-pain 595, but a held support vector at 599
-    # keeps the estimate at/above 599.
+    # Pin would drift down toward max-pain 595, but a held support vector at 598
+    # (beyond the near-spot bracket gate of 0.35 * daily_em = 1.4) keeps the
+    # estimate at/above 598.
     gex = _gex([(595, 6e8), (596, 4e8)])
     vectors = {
-        'support_vector': {'role': 'support', 'current_value': 599.0},
+        'support_vector': {'role': 'support', 'current_value': 598.0},
         'resistance_vector': None,
     }
     out = compute_dealer_pin_close(600.0, 595.0, gex, _FR, _IV, 'transitional',
                                    vectors=vectors)
-    assert out['estimated_close'] >= 599.0 - 1e-9
+    assert out['estimated_close'] >= 598.0 - 1e-9
+
+
+def test_vector_hugging_spot_cannot_clamp_the_pin():
+    # A vector inside the bracket gate (599.5, only 0.5 from spot with
+    # min_gap = 0.35 * 4.0 = 1.4) says nothing about the close — without the
+    # gate it glued the estimate onto spot all session.
+    gex = _gex([(595, 6e8), (596, 4e8)])
+    vectors = {
+        'support_vector': {'role': 'support', 'current_value': 599.5},
+        'resistance_vector': None,
+    }
+    out = compute_dealer_pin_close(600.0, 595.0, gex, _FR, _IV, 'transitional',
+                                   vectors=vectors)
+    base = compute_dealer_pin_close(600.0, 595.0, gex, _FR, _IV, 'transitional')
+    assert out['estimated_close'] == base['estimated_close']
+    assert out['estimated_close'] < 599.5
 
 
 # ── fractal-dimension degenerate windows (the vertical-spike artifact) ──────

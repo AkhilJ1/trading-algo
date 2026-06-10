@@ -2067,6 +2067,27 @@ elif page == '🔬 Fractal & Options':
     k5.metric('VRP Adj', f"IV overstates {vrp.get('vrp_pct', 0):.0f}%")
     k6.metric('Market Regime', result['market_regime'].title())
 
+    # ── Nearest reaction levels ─────────────────────────────────────────────
+    # First *defended* level above/below spot regardless of distance — the
+    # trader's-eye "where does the tape react next?" readout. Distinct from
+    # floor/ceiling: these can sit pennies from spot.
+    rl = result.get('reaction_levels') or {}
+    rs, rr = rl.get('support'), rl.get('resistance')
+    if rs or rr:
+        x1, x2 = st.columns(2)
+        if rs:
+            x1.metric('Reaction Support', f"${rs['level']:.2f}",
+                      delta=f"{rs['distance_pct']:+.2f}% · {', '.join(rs['sources'])}",
+                      delta_color='off')
+        else:
+            x1.metric('Reaction Support', '—')
+        if rr:
+            x2.metric('Reaction Resistance', f"${rr['level']:.2f}",
+                      delta=f"{rr['distance_pct']:+.2f}% · {', '.join(rr['sources'])}",
+                      delta_color='off')
+        else:
+            x2.metric('Reaction Resistance', '—')
+
     # ── Estimated Close (dealer pin) — item 4 ──────────────────────────────
     # Where dealers are incentivized to settle price into expiry so the most
     # open interest expires out-of-the-money (the "safest outcome" for the
@@ -2098,8 +2119,10 @@ elif page == '🔬 Fractal & Options':
             "Where dealers are incentivized to settle so the most open interest "
             f"expires out-of-the-money. Anchored on max-pain (${est['max_pain']:.2f})"
             + (f" + gamma magnet (${_gp:.2f})" if _gp is not None else "")
-            + f", pulled {est['pull_fraction']*100:.0f}% from spot and bracketed by "
-            "fractal structure and the 1σ expected move. "
+            + f", pulled {est['pull_fraction']*100:.0f}% from "
+            + (f"today's open (${est['anchor_price']:.2f})"
+               if est.get('anchor_source') == 'session_open' else "spot")
+            + " and bracketed by fractal structure and the 1σ expected move. "
             f"Horizon: {est.get('expiry_dte', '?')} DTE. "
             "Strongest in positive-gamma (sticky) regimes; in negative-gamma "
             "(slippery) regimes the pin is weak and price drifts."

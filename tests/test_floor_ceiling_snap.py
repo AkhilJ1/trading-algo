@@ -16,6 +16,7 @@ from config import (
 )
 from strategies.fractal_options import (
     _compute_floor_ceiling, _collect_level_candidates, _snap_level,
+    nearest_reaction_levels,
 )
 
 
@@ -167,3 +168,33 @@ def test_collect_candidates_respects_sides_and_gates():
 def test_snap_level_handles_degenerate_inputs():
     assert _snap_level(SPOT, 98.0, 0.0, [(98.5, 'gex')], 'floor') is None
     assert _snap_level(SPOT, 98.0, BASE_MOVE, [], 'floor') is None
+
+
+# ── nearest reaction levels (first defended level, no distance window) ───────
+
+def test_reaction_levels_pick_nearest_defended_either_side():
+    gex = _gex_df([(99.8, -5e9), (97.0, -3e9), (100.4, 4e9), (103.0, 2e9)])
+    rl = nearest_reaction_levels(SPOT, gex_df=gex)
+    # Nearest defended levels win even though both sit far inside the snap
+    # window's minimum distance — reaction levels have no window.
+    assert rl['support']['level'] == 99.8
+    assert rl['support']['sources'] == ['gex']
+    assert rl['resistance']['level'] == 100.4
+    assert rl['resistance']['distance'] == 0.4
+
+
+def test_lone_fractal_pivot_is_not_defended():
+    fl = {'support_levels': [('d', 99.7)], 'resistance_levels': []}
+    rl = nearest_reaction_levels(SPOT, fractal_levels=fl)
+    assert rl['support'] is None
+    # ...but the same pivot clustered with a vector (2 sources) is defended.
+    vec = {'support_vector': {'role': 'support', 'current_value': 99.68},
+           'resistance_vector': None}
+    rl2 = nearest_reaction_levels(SPOT, fractal_levels=fl, vectors=vec)
+    assert rl2['support'] is not None
+    assert rl2['support']['sources'] == ['fractal', 'vector']
+
+
+def test_reaction_levels_empty_inputs_are_safe():
+    rl = nearest_reaction_levels(SPOT)
+    assert rl == {'support': None, 'resistance': None}

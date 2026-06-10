@@ -111,6 +111,12 @@ LEVEL_SNAP_BLEND_BASE = 0.50    # weight on the level when one source backs it
 LEVEL_SNAP_BLEND_STEP = 0.15    # extra weight per additional independent source
 LEVEL_SNAP_BLEND_MAX = 0.85     # never fully abandon the calibrated IV band edge
 
+# Dealer-pin bracket gate: structure (fractals/neurals/vectors) closer to spot
+# than this many daily expected moves cannot tighten the pin bracket — a
+# trendline running through current price would otherwise glue the estimated
+# close to spot all session.
+PIN_BRACKET_MIN_SIGMA = 0.35
+
 # ── Chart Indicators ────────────────────────────────────────────────────
 VWAP_WINDOW = 20                # Rolling window for daily VWAP
 ZSCORE_WINDOW = 50              # Lookback for Z-score calculation
