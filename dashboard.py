@@ -1914,6 +1914,27 @@ elif page == '🔬 Fractal & Options':
             "The live chain is currently unavailable — the market is likely closed."
         )
 
+    # Dead-activity banner: a chain can be served "live" yet carry zero open
+    # interest AND zero volume (degraded provider response). Every dealer-
+    # positioning output then quietly collapses — max pain falls back to spot,
+    # the estimated close hugs it at +0.00%, GEX and walls are empty, and no
+    # reaction level can be defended. Say so plainly: a blank reaction row on
+    # a dead chain is a data problem, not a market read.
+    _w = result.get('options_walls') or {}
+    _g = result.get('gex_df')
+    _dead_walls = not _w.get('put_walls') and not _w.get('call_walls')
+    _dead_gex = _g is None or _g.empty or not (_g['net_gex'].abs() > 0).any()
+    if _dead_walls and _dead_gex:
+        st.error(
+            "**The options chain for this run carried no open interest or "
+            f"volume** (source: {result.get('source') or 'unknown'}, as of "
+            f"{result.get('as_of') or 'n/a'}). Dealer-positioning outputs are "
+            "degraded: max pain defaulted to spot, the estimated close will "
+            "hug the live price, and GEX, walls, and reaction levels are "
+            "empty. Check the data provider (Schwab token / yfinance "
+            "fallback) before trusting this run."
+        )
+
     # Expiry-substitution banner: when the requested expiry's live chain is
     # unusable AND no cached snapshot exists for it, the data layer serves the
     # most recent available expiry instead. Say so loudly — otherwise the dealer
