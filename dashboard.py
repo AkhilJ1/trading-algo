@@ -2086,14 +2086,16 @@ elif page == '🔬 Fractal & Options':
             f"Max Pain (info only): ${result['max_pain']:.2f}"
         )
 
-    # VIX regime + Ensemble consensus row
+    # VIX regime row. (The old "Ensemble Consensus" metric that lived here was
+    # removed: the bias flag at the top of the page already carries the
+    # directional verdict, and the metric cost an extra 1-year fetch plus a
+    # six-strategy run on every render just to restate it.)
     try:
         from strategies.vix_filter import fetch_vix, classify_vix_regime
         vix_s = fetch_vix(period='1mo')
         if not vix_s.empty:
             current_vix = float(vix_s.iloc[-1])
             vix_regime = classify_vix_regime(current_vix)
-            regime_colors = {'low_vol': 'green', 'normal': 'blue', 'elevated': 'orange', 'crisis': 'red'}
         else:
             current_vix = None
             vix_regime = 'unknown'
@@ -2101,34 +2103,12 @@ elif page == '🔬 Fractal & Options':
         current_vix = None
         vix_regime = 'unknown'
 
-    try:
-        from strategies.ensemble import generate_signals as _ens_signals
-        price_ticker = result['resolved_ticker'] if result['proxy_used'] else result['ticker']
-        ens_df = fetch_stock_data(price_ticker, period='1y')
-        if not ens_df.empty:
-            if isinstance(ens_df.index, pd.DatetimeIndex) and ens_df.index.tz is not None:
-                ens_df.index = ens_df.index.tz_localize(None)
-            ens_df = _ens_signals(ens_df, threshold=3)
-            ens_votes = int(ens_df['ensemble_votes_buy'].iloc[-1])
-            ens_total = 6
-            ens_conf = ens_df['ensemble_confidence'].iloc[-1]
-        else:
-            ens_votes = 0
-            ens_total = 6
-            ens_conf = 0
-    except Exception:
-        ens_votes = 0
-        ens_total = 6
-        ens_conf = 0
-
-    v1, v2, v3 = st.columns(3)
+    v1, v2 = st.columns(2)
     if current_vix is not None:
         v1.metric('VIX', f"{current_vix:.1f}", delta=vix_regime.replace('_', ' ').title())
     else:
         v1.metric('VIX', 'N/A')
-    v2.metric('Ensemble Consensus', f"{ens_votes}/{ens_total} bullish",
-              delta=f"{ens_conf*100:.0f}% agreement")
-    v3.metric('VIX Regime Signal',
+    v2.metric('VIX Regime Signal',
               'Full Size' if vix_regime in ('low_vol', 'normal')
               else 'Half Size' if vix_regime == 'elevated'
               else 'Cash Only' if vix_regime == 'crisis' else 'Unknown')
