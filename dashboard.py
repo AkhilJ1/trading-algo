@@ -2752,14 +2752,70 @@ elif page == '🔬 Fractal & Options':
                    'confirmation-lag-honest break-of-structure flags, sloped '
                    'vectors (flip role on a cross), neural zones drawn as '
                    'bands (scored by repeated bounces), and the 1σ/2σ '
-                   'envelope + max-pain.')
-        price_df = result['price_df'].tail(120)
+                   'envelope + max-pain. Pick a timeframe — the structure '
+                   'logic (pivots, HH/HL tags, BOS, fractal dimension) is '
+                   'recomputed on that timeframe\'s bars, so Daily shows the '
+                   'intraday swing structure living inside the larger '
+                   'Weekly/Monthly/Yearly structure.')
+
+        # ── Timeframe selector ─────────────────────────────────────────
+        # Daily/Weekly/Monthly fetch intraday bars and recompute the fractal
+        # columns on them (a Williams pivot is timeframe-relative); Yearly
+        # uses the analysis's daily frame, whose fractal columns are already
+        # in place. Intraday fetches degrade to the daily frame so the chart
+        # never blanks (weekend / feed outage).
+        _FS_RANGES = {
+            'Daily':   dict(period='2d',  interval='5m',  intraday=True, sessions=1),
+            'Weekly':  dict(period='7d',  interval='15m', intraday=True, sessions=5),
+            'Monthly': dict(period='1mo', interval='1h',  intraday=True, sessions=23),
+            'Yearly':  dict(intraday=False, daily_tail=252),
+        }
+        _fs_choice = st.segmented_control(
+            'Structure timeframe', list(_FS_RANGES.keys()), default='Daily',
+            key='fs_range', label_visibility='collapsed',
+        ) or 'Daily'
+        _fs_spec = _FS_RANGES[_fs_choice]
+        _fs_intraday = False
+
+        price_df = None
+        if _fs_spec['intraday']:
+            try:
+                from strategies.fractal_indicators import (
+                    add_williams_fractals as _fs_add_fractals,
+                    calculate_fractal_dimension as _fs_fd,
+                )
+                from options_fetcher import _is_market_hours as _fs_open
+                _fs_df = fetch_stock_data(
+                    result['resolved_ticker'], period=_fs_spec['period'],
+                    interval=_fs_spec['interval'],
+                    use_cache=(not bool(_fs_open())),
+                )
+                if _fs_df is not None and not _fs_df.empty:
+                    if isinstance(_fs_df.index, pd.DatetimeIndex) and _fs_df.index.tz is not None:
+                        _fs_df.index = _fs_df.index.tz_localize(None)
+                    # Clip to the requested number of most recent sessions.
+                    _days = sorted(set(_fs_df.index.normalize()))
+                    _fs_df = _fs_df[_fs_df.index.normalize().isin(_days[-_fs_spec['sessions']:])]
+                    if len(_fs_df) >= 25:    # enough bars for pivots + FD
+                        _fs_df = _fs_add_fractals(_fs_df.copy())
+                        try:
+                            _fs_df['fractal_dimension'] = _fs_fd(_fs_df)
+                        except Exception:
+                            pass
+                        price_df = _fs_df
+                        _fs_intraday = True
+            except Exception:
+                price_df = None
+        if price_df is None or price_df.empty:
+            price_df = result['price_df'].tail(_fs_spec.get('daily_tail', 120))
+            if _fs_spec['intraday']:
+                st.caption('⚪ Intraday bars unavailable — showing the daily frame.')
 
         fig_frac = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
             row_heights=[0.75, 0.25], vertical_spacing=0.03,
             subplot_titles=(
-                f"{result['resolved_ticker']} — Fractal Pivots",
+                f"{result['resolved_ticker']} — Fractal Pivots ({_fs_choice})",
                 "Fractal Dimension (1.0=trending, 2.0=choppy)",
             ),
         )
@@ -2938,7 +2994,10 @@ elif page == '🔬 Fractal & Options':
             if not _v or _v.get('current_value') is None:
                 continue
             _ry = _v['current_value'] / r_ratio if r_ratio > 1 else _v['current_value']
-            _slope = _v.get('slope_per_bar', 0.0)        # proxy units per bar
+            # slope_per_bar is denominated in DAILY bars — projecting it
+            # across intraday bars would draw a wildly wrong line, so on
+            # intraday timeframes the vector renders flat at its current value.
+            _slope = 0.0 if _fs_intraday else _v.get('slope_per_bar', 0.0)
             _ly = _ry - _slope * (_nbars - 1)
             fig_frac.add_trace(go.Scatter(
                 x=[price_df.index[0], price_df.index[-1]], y=[_ly, _ry],
@@ -3022,6 +3081,11 @@ elif page == '🔬 Fractal & Options':
             font=dict(color='#fafafa'),
         )
         fig_frac.update_xaxes(gridcolor='#1e2130')
+        if _fs_intraday:
+            fig_frac.update_xaxes(rangebreaks=[
+                dict(bounds=['sat', 'mon']),
+                dict(bounds=[16, 9.5], pattern='hour'),
+            ])
         fig_frac.update_yaxes(gridcolor='#1e2130')
         mobilize(fig_frac, height_mobile=560)
         st.plotly_chart(fig_frac, width='stretch', config=PLOTLY_CONFIG)
