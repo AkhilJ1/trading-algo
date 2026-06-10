@@ -2525,16 +2525,24 @@ elif page == '🔬 Fractal & Options':
                                 continue
                             _times = list(_pts['x_pos'])
                             _vals = list(_pts[_col])
-                            # Pick which runs get a price tag: the level must
-                            # have moved vs the prior run, and later tags win
-                            # any spot on the axis (walk newest→oldest, drop a
-                            # tag landing within _min_gap of one already kept).
+                            # Pick which runs get a price tag. Floor and
+                            # ceiling tag INDEPENDENTLY: a level only prints
+                            # when it has moved meaningfully (≥0.05% of price,
+                            # min $0.10) since ITS last printed value — so a
+                            # run that only relocated the ceiling prints just
+                            # a ceiling tag while the floor's line continues
+                            # untagged, like Milk's prints, instead of every
+                            # run stamping a synchronized floor+ceiling pair
+                            # at the same timestamp. Later tags win any spot
+                            # on the axis (walk newest→oldest, drop a tag
+                            # landing within _min_gap of one already kept).
                             _cand = []
-                            _prev_val = None
+                            _last_tagged = None
                             for _i, _v in enumerate(_vals):
-                                if _prev_val is None or abs(_v - _prev_val) >= 0.01:
+                                _eps = max(0.10, abs(_v) * 0.0005)
+                                if _last_tagged is None or abs(_v - _last_tagged) >= _eps:
                                     _cand.append(_i)
-                                _prev_val = _v
+                                    _last_tagged = _v
                             _tag_idx, _kept_x = [], []
                             for _i in reversed(_cand):
                                 if all(abs(_times[_i] - _kx) >= _min_gap
