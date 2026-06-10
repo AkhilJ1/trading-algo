@@ -170,6 +170,12 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
     except Exception as e:
         print(f"  [{ticker}] levels snapshot failed ({e}) — forecast still recorded")
 
+    # ML-ready point-in-time feature snapshot (dealer positioning, vol state,
+    # overnight gap/range, trend structure) — the research ledger for
+    # improving the model. Never blocks the forecast. See feature_log.py.
+    from feature_log import log_features
+    log_features(result, "pre_open", sheets_ok, vix_val=vix_val, vix_regime=regime)
+
     dest = "Google Sheets" if (sheets_ok and logged) else "local CSV"
     spot_src = result.get("spot_source", "daily_close")
     est = kwargs["estimated_close"]
