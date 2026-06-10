@@ -2494,26 +2494,52 @@ elif page == '🔬 Fractal & Options':
                         _lh = _lh[(_lh['ts_et'] >= _x_lo - pd.Timedelta(hours=1))
                                   & (_lh['ts_et'] <= _x_hi + pd.Timedelta(hours=1))]
                     if not _lh.empty:
+                        # Milk-style: each run's level is its own horizontal
+                        # segment anchored AT the run's timestamp and extended
+                        # until the next run supersedes it (the latest one runs
+                        # to the chart edge), with a small price tag boxed at
+                        # the anchor — so the chart reads "this floor/ceiling
+                        # was called at this time," exactly like the Yellowbox
+                        # level prints.
                         _x_end = _amdf.index.max()
-                        for _col, _color, _label in (
-                            ('floor', 'rgba(38,166,154,0.55)', 'Floor @ run'),
-                            ('ceiling', 'rgba(239,83,80,0.55)', 'Ceiling @ run'),
+                        for _col, _color, _txt_color, _label in (
+                            ('floor', 'rgba(38,166,154,0.55)', '#26a69a', 'Floor'),
+                            ('ceiling', 'rgba(239,83,80,0.55)', '#ef5350', 'Ceiling'),
                         ):
                             _pts = _lh.dropna(subset=[_col])
                             if _pts.empty:
                                 continue
-                            _xs = [*_pts['ts_et'], _x_end]
-                            _ys = [_am_ax(v) for v in _pts[_col]]
-                            _ys = [*_ys, _ys[-1]]
+                            _times = list(_pts['ts_et'])
+                            _vals = list(_pts[_col])
+                            _xs, _ys = [], []
+                            _prev_val = None
+                            for _i, (_t0, _v) in enumerate(zip(_times, _vals)):
+                                _t1 = _times[_i + 1] if _i + 1 < len(_times) else _x_end
+                                _y = _am_ax(_v)
+                                # Disconnected segments (None gap = no vertical joins)
+                                _xs += [_t0, _t1, None]
+                                _ys += [_y, _y, None]
+                                # Price tag at the anchor time — only when the
+                                # level actually moved, so reruns at an
+                                # unchanged level don't stack duplicate boxes.
+                                if _prev_val is None or abs(_v - _prev_val) >= 0.01:
+                                    fig_am.add_annotation(
+                                        x=_t0, y=_y, xref='x', yref='y',
+                                        text=f"{_label} {_v:,.2f}",
+                                        showarrow=False, xanchor='left',
+                                        yanchor='bottom' if _col == 'ceiling' else 'top',
+                                        font=dict(color=_txt_color, size=10),
+                                        bgcolor='rgba(14,17,23,0.75)',
+                                        bordercolor=_color, borderwidth=1,
+                                        borderpad=2,
+                                    )
+                                _prev_val = _v
                             fig_am.add_trace(go.Scatter(
-                                x=_xs, y=_ys, mode='lines+markers',
-                                name=_label, showlegend=False,
-                                line=dict(color=_color, width=1.2,
-                                          dash='dot', shape='hv'),
-                                marker=dict(size=5, symbol='diamond',
-                                            color=_color),
+                                x=_xs, y=_ys, mode='lines',
+                                name=f'{_label} @ run', showlegend=False,
+                                line=dict(color=_color, width=1.4, dash='dot'),
                                 hovertemplate=(_label
-                                               + ' %{y:.2f}<br>%{x|%H:%M} ET'
+                                               + ' %{y:.2f}<br>set %{x|%H:%M} ET'
                                                '<extra></extra>'),
                             ))
             except Exception:
@@ -2622,9 +2648,12 @@ elif page == '🔬 Fractal & Options':
     # ──────────────────────────────────────────────────────────────────────
     with tab_struct:
         st.subheader('Fractal Market Structure')
-        st.caption('Williams pivots + sloped vectors (flip role on a cross) + '
-                   'horizontal neural zones (scored by repeated bounces), drawn '
-                   'against the 1σ/2σ envelope and max-pain.')
+        st.caption('Confirmed Williams pivots joined into the swing structure '
+                   '(HH/HL = uptrend legs, LH/LL = downtrend legs) with '
+                   'confirmation-lag-honest break-of-structure flags, sloped '
+                   'vectors (flip role on a cross), neural zones drawn as '
+                   'bands (scored by repeated bounces), and the 1σ/2σ '
+                   'envelope + max-pain.')
         price_df = result['price_df'].tail(120)
 
         fig_frac = make_subplots(
@@ -2660,6 +2689,119 @@ elif page == '🔬 Fractal & Options':
                 mode='markers', name='Fractal Low (Support)',
                 marker=dict(symbol='triangle-up', color='#26a69a', size=10),
             ), row=1, col=1)
+
+        # ── Swing structure: the actual way to READ fractals ──────────────
+        # A raw pivot scatter hides the story; joining alternating confirmed
+        # pivots into a zigzag exposes it: HH+HL sequences = uptrend legs,
+        # LH+LL = downtrend legs, mixed = range. Consecutive same-side pivots
+        # collapse to the more extreme one (the true swing point). On top of
+        # the zigzag: HH/HL/LH/LL tags per swing, a structure-bias badge from
+        # the last four tags, and break-of-structure flags where a CLOSE takes
+        # out the most recent swing high/low. BOS detection honors the
+        # confirmation lag — a Williams pivot is only knowable FRACTAL_PERIOD
+        # bars after it prints, so no break is flagged with hindsight data.
+        # Best-effort: structure overlays must never blank the chart.
+        try:
+            from config import FRACTAL_PERIOD as _frac_lag
+            _piv = []
+            for _ts, _prow in price_df.iterrows():
+                if pd.notna(_prow.get('fractal_high')):
+                    _piv.append([_ts, float(_prow['fractal_high']), 'H'])
+                if pd.notna(_prow.get('fractal_low')):
+                    _piv.append([_ts, float(_prow['fractal_low']), 'L'])
+            _swings = []
+            for _p in _piv:
+                if _swings and _swings[-1][2] == _p[2]:
+                    if (_p[2] == 'H' and _p[1] >= _swings[-1][1]) or \
+                       (_p[2] == 'L' and _p[1] <= _swings[-1][1]):
+                        _swings[-1] = _p
+                else:
+                    _swings.append(_p)
+
+            if len(_swings) >= 2:
+                fig_frac.add_trace(go.Scatter(
+                    x=[_s[0] for _s in _swings], y=[_s[1] for _s in _swings],
+                    mode='lines', name='Swing structure',
+                    line=dict(color='rgba(176,190,197,0.45)', width=1.3),
+                    hoverinfo='skip',
+                ), row=1, col=1)
+
+            # HH/HL/LH/LL vs the previous same-side swing (last 8 to stay legible)
+            _last_side = {'H': None, 'L': None}
+            _tags = []
+            for _ts, _v, _side in _swings:
+                _prev = _last_side[_side]
+                if _prev is not None:
+                    _tag = (('HH' if _v > _prev else 'LH') if _side == 'H'
+                            else ('LL' if _v < _prev else 'HL'))
+                    _tags.append((_ts, _v, _side, _tag))
+                _last_side[_side] = _v
+            for _ts, _v, _side, _tag in _tags[-8:]:
+                _bull = _tag in ('HH', 'HL')
+                fig_frac.add_annotation(
+                    x=_ts, y=_v, text=_tag, showarrow=False,
+                    yanchor='bottom' if _side == 'H' else 'top',
+                    yshift=10 if _side == 'H' else -10,
+                    font=dict(size=10,
+                              color='#26a69a' if _bull else '#ef5350'),
+                    row=1, col=1,
+                )
+
+            # Structure-bias badge from the last four swing tags
+            _recent = [_t[3] for _t in _tags[-4:]]
+            if _recent:
+                _nb = sum(1 for _t in _recent if _t in ('HH', 'HL'))
+                _ns = sum(1 for _t in _recent if _t in ('LH', 'LL'))
+                if _nb >= 3:
+                    _stxt, _scol = '▲ Uptrend structure (HH·HL)', '#26a69a'
+                elif _ns >= 3:
+                    _stxt, _scol = '▼ Downtrend structure (LH·LL)', '#ef5350'
+                else:
+                    _stxt, _scol = '◆ Mixed / range structure', '#ff9800'
+                fig_frac.add_annotation(
+                    xref='paper', yref='paper', x=0.01, y=0.99,
+                    xanchor='left', yanchor='top', text=_stxt, showarrow=False,
+                    font=dict(size=12, color=_scol),
+                    bgcolor='rgba(14,17,23,0.7)', bordercolor=_scol,
+                    borderwidth=1, borderpad=3,
+                )
+
+            # Break of structure: close crossing the most recent ACTIVE swing
+            # (a pivot activates FRACTAL_PERIOD bars after its bar prints).
+            _pos_swings = []
+            _pos_of = {ts: i for i, ts in enumerate(price_df.index)}
+            for _ts, _v, _side in _swings:
+                if _ts in _pos_of:
+                    _pos_swings.append((_pos_of[_ts], _v, _side))
+            _closes = price_df['Close'].values
+            _events, _act_h, _act_l, _pi = [], None, None, 0
+            for _bar in range(len(price_df)):
+                while (_pi < len(_pos_swings)
+                       and _pos_swings[_pi][0] + _frac_lag <= _bar):
+                    if _pos_swings[_pi][2] == 'H':
+                        _act_h = _pos_swings[_pi][1]
+                    else:
+                        _act_l = _pos_swings[_pi][1]
+                    _pi += 1
+                _c = float(_closes[_bar])
+                if _act_h is not None and _c > _act_h:
+                    _events.append((price_df.index[_bar], _act_h, True))
+                    _act_h = None
+                if _act_l is not None and _c < _act_l:
+                    _events.append((price_df.index[_bar], _act_l, False))
+                    _act_l = None
+            for _ts, _lvl, _up in _events[-3:]:
+                fig_frac.add_annotation(
+                    x=_ts, y=_lvl, text='BOS ▲' if _up else 'BOS ▼',
+                    showarrow=True, arrowhead=2, arrowsize=0.8,
+                    arrowcolor='#26a69a' if _up else '#ef5350',
+                    ax=0, ay=22 if _up else -22,
+                    font=dict(size=10,
+                              color='#26a69a' if _up else '#ef5350'),
+                    row=1, col=1,
+                )
+        except Exception:
+            pass
 
         # Floor / Ceiling lines at multiple sigma levels
         proxy_floor = floor_val / r_ratio if r_ratio > 1 else floor_val
@@ -2706,30 +2848,45 @@ elif page == '🔬 Fractal & Options':
                           dash='dot' if _v.get('crossed') else 'solid'),
             ), row=1, col=1)
 
-        # Neurals — strongest horizontal zones (multiple-bounce levels). Only draw
-        # zones that fall inside the visible price window so a strong-but-distant
-        # level doesn't compress the y-axis.
+        # Neurals — strongest horizontal zones (multiple-bounce levels), drawn
+        # as BANDS rather than 1px lines: a level that has bounced price
+        # repeatedly is a zone with width (the clustering tolerance), and
+        # opacity scales with its bounce strength. Only zones inside the
+        # visible price window are drawn so a strong-but-distant level doesn't
+        # compress the y-axis.
+        from config import NEURAL_TOLERANCE_PCT as _neur_tol
         _neur = result.get('neural_zones') or {}
         _vis_lo, _vis_hi = float(price_df['Low'].min()), float(price_df['High'].max())
-        for _z in (_neur.get('support_zones') or [])[:3]:
-            _yc = _z['center'] / r_ratio if r_ratio > 1 else _z['center']
-            if _z.get('strength', 0) < 2 or not (_vis_lo <= _yc <= _vis_hi):
-                continue
-            fig_frac.add_hline(y=_yc, line=dict(color='#26a69a', width=1),
-                               row=1, col=1,
-                               annotation_text=f"Neural S ${_z['center']:.0f} (×{_z['bounces']})",
-                               annotation_position='right')
-        for _z in (_neur.get('resistance_zones') or [])[:3]:
-            _yc = _z['center'] / r_ratio if r_ratio > 1 else _z['center']
-            if _z.get('strength', 0) < 2 or not (_vis_lo <= _yc <= _vis_hi):
-                continue
-            fig_frac.add_hline(y=_yc, line=dict(color='#ef5350', width=1),
-                               row=1, col=1,
-                               annotation_text=f"Neural R ${_z['center']:.0f} (×{_z['bounces']})",
-                               annotation_position='right')
+        for _zones, _rgb, _zlabel in (
+            (_neur.get('support_zones') or [], '38,166,154', 'Neural S'),
+            (_neur.get('resistance_zones') or [], '239,83,80', 'Neural R'),
+        ):
+            for _z in _zones[:3]:
+                _yc = _z['center'] / r_ratio if r_ratio > 1 else _z['center']
+                if _z.get('strength', 0) < 2 or not (_vis_lo <= _yc <= _vis_hi):
+                    continue
+                _half = _yc * _neur_tol / 100.0
+                _alpha = min(0.08 + 0.04 * float(_z.get('strength', 2)), 0.28)
+                fig_frac.add_hrect(
+                    y0=_yc - _half, y1=_yc + _half,
+                    fillcolor=f'rgba({_rgb},{_alpha:.2f})', line_width=0,
+                    layer='below', row=1, col=1,
+                    annotation_text=f"{_zlabel} ${_z['center']:.0f} (×{_z['bounces']})",
+                    annotation_position='top right',
+                    annotation_font_color=f'rgb({_rgb})',
+                    annotation_font_size=10,
+                )
 
-        # Fractal dimension subplot
+        # Fractal dimension subplot — the regime dial that tells you HOW MUCH
+        # to trust the structure: in trending tape (FD < 1.35) breaks tend to
+        # follow through, in choppy tape (FD > 1.65) fractal levels act as
+        # fade zones rather than breakout triggers. Shaded regime bands +
+        # a live badge with the current reading make that instant to read.
         if 'fractal_dimension' in price_df.columns:
+            fig_frac.add_hrect(y0=1.0, y1=1.35, fillcolor='rgba(38,166,154,0.07)',
+                               line_width=0, layer='below', row=2, col=1)
+            fig_frac.add_hrect(y0=1.65, y1=2.0, fillcolor='rgba(239,83,80,0.07)',
+                               line_width=0, layer='below', row=2, col=1)
             fig_frac.add_trace(go.Scatter(
                 x=price_df.index, y=price_df['fractal_dimension'],
                 name='Fractal Dimension', line=dict(color='#ff9800', width=1.5),
@@ -2740,6 +2897,21 @@ elif page == '🔬 Fractal & Options':
                                row=2, col=1, annotation_text='Trending')
             fig_frac.add_hline(y=1.65, line=dict(color='#ef5350', dash='dot'),
                                row=2, col=1, annotation_text='Choppy')
+            _fd_series = price_df['fractal_dimension'].dropna()
+            if not _fd_series.empty:
+                _fd_now = float(_fd_series.iloc[-1])
+                _fd_col = ('#26a69a' if _fd_now < 1.35
+                           else '#ef5350' if _fd_now > 1.65 else '#ff9800')
+                _fd_word = ('trending' if _fd_now < 1.35
+                            else 'choppy' if _fd_now > 1.65 else 'transitional')
+                fig_frac.add_annotation(
+                    x=_fd_series.index[-1], y=_fd_now,
+                    text=f'{_fd_now:.2f} · {_fd_word}', showarrow=False,
+                    xanchor='right', yanchor='bottom',
+                    font=dict(size=11, color=_fd_col),
+                    bgcolor='rgba(14,17,23,0.7)',
+                    row=2, col=1,
+                )
 
         fig_frac.update_layout(
             height=650, xaxis_rangeslider_visible=False,
