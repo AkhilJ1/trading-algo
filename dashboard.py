@@ -2437,26 +2437,27 @@ elif page == '🔬 Fractal & Options':
                                  fillcolor='rgba(38,166,154,0.06)', line_width=0, layer='below')
 
             # ── Core horizontal levels ─────────────────────────────────────
+            # Lines draw at their exact prices; their right-edge labels are
+            # collected and placed AFTER the walls in a collision pass
+            # (_am_labels) so two levels landing within pennies of each other
+            # (e.g. call wall 750.00 under seller objective 749.94) stack as
+            # separate readable tags instead of printing on top of each other.
+            _am_labels = []   # (y_axis_value, text, color, font_size)
             if _am_ceil1_ax is not None:
-                fig_am.add_hline(y=_am_ceil1_ax, line=dict(color='#ef5350', width=2),
-                                 annotation_text=f"Ceiling {_am_fmt(_am_ceil1)}",
-                                 annotation_position='right', annotation_font_color='#ef5350')
+                fig_am.add_hline(y=_am_ceil1_ax, line=dict(color='#ef5350', width=2))
+                _am_labels.append((_am_ceil1_ax, f"Ceiling {_am_fmt(_am_ceil1)}", '#ef5350', 11))
             if _am_floor1_ax is not None:
-                fig_am.add_hline(y=_am_floor1_ax, line=dict(color='#26a69a', width=2),
-                                 annotation_text=f"Floor {_am_fmt(_am_floor1)}",
-                                 annotation_position='right', annotation_font_color='#26a69a')
+                fig_am.add_hline(y=_am_floor1_ax, line=dict(color='#26a69a', width=2))
+                _am_labels.append((_am_floor1_ax, f"Floor {_am_fmt(_am_floor1)}", '#26a69a', 11))
             if _am_ceil2_ax is not None:
-                fig_am.add_hline(y=_am_ceil2_ax, line=dict(color='#ef5350', width=1.5, dash='dash'),
-                                 annotation_text=f"Seller Objective {_am_fmt(_am_ceil2)}",
-                                 annotation_position='right', annotation_font_color='#ff8a80')
+                fig_am.add_hline(y=_am_ceil2_ax, line=dict(color='#ef5350', width=1.5, dash='dash'))
+                _am_labels.append((_am_ceil2_ax, f"Seller Objective {_am_fmt(_am_ceil2)}", '#ff8a80', 11))
             if _am_floor2_ax is not None:
-                fig_am.add_hline(y=_am_floor2_ax, line=dict(color='#26a69a', width=1.5, dash='dash'),
-                                 annotation_text=f"Buyer Objective {_am_fmt(_am_floor2)}",
-                                 annotation_position='right', annotation_font_color='#80cbc4')
+                fig_am.add_hline(y=_am_floor2_ax, line=dict(color='#26a69a', width=1.5, dash='dash'))
+                _am_labels.append((_am_floor2_ax, f"Buyer Objective {_am_fmt(_am_floor2)}", '#80cbc4', 11))
             if _am_pivot_ax is not None:
-                fig_am.add_hline(y=_am_pivot_ax, line=dict(color='#b0bec5', width=1.5, dash='dashdot'),
-                                 annotation_text=f"Pivot {_am_fmt(_am_pivot_disp)}",
-                                 annotation_position='right', annotation_font_color='#b0bec5')
+                fig_am.add_hline(y=_am_pivot_ax, line=dict(color='#b0bec5', width=1.5, dash='dashdot'))
+                _am_labels.append((_am_pivot_ax, f"Pivot {_am_fmt(_am_pivot_disp)}", '#b0bec5', 11))
 
             # ── Floor/ceiling history: one stepped line per analysis run ──
             # Every run (6:25am recorder, 1:16pm recorder, each dashboard
@@ -2574,16 +2575,35 @@ elif page == '🔬 Fractal & Options':
             # ── Option walls (proxy units) as secondary objective ticks ────
             if _am_in_band(_am_cwall):
                 _cw_lbl = _am_cwall * _am_ratio if _am_ratio > 1 else _am_cwall
-                fig_am.add_hline(y=_am_cwall, line=dict(color='#ef9a9a', width=1, dash='dot'),
-                                 annotation_text=f"Call wall {_am_fmt(_cw_lbl)}",
-                                 annotation_position='right',
-                                 annotation_font_color='#ef9a9a', annotation_font_size=10)
+                fig_am.add_hline(y=_am_cwall, line=dict(color='#ef9a9a', width=1, dash='dot'))
+                _am_labels.append((_am_cwall, f"Call wall {_am_fmt(_cw_lbl)}", '#ef9a9a', 10))
             if _am_in_band(_am_pwall):
                 _pw_lbl = _am_pwall * _am_ratio if _am_ratio > 1 else _am_pwall
-                fig_am.add_hline(y=_am_pwall, line=dict(color='#a5d6a7', width=1, dash='dot'),
-                                 annotation_text=f"Put wall {_am_fmt(_pw_lbl)}",
-                                 annotation_position='right',
-                                 annotation_font_color='#a5d6a7', annotation_font_size=10)
+                fig_am.add_hline(y=_am_pwall, line=dict(color='#a5d6a7', width=1, dash='dot'))
+                _am_labels.append((_am_pwall, f"Put wall {_am_fmt(_pw_lbl)}", '#a5d6a7', 10))
+
+            # ── Right-edge label collision pass ────────────────────────────
+            # Convert each label's price to approximate pixel space; walking
+            # bottom-up, any label that would overlap the one below it is
+            # nudged up just enough to clear (yshift in px). Lines stay at
+            # their exact prices — only the text tags fan apart.
+            _plot_px = 640 - 120                       # chart height minus margins
+            _ppu = _plot_px / max(_yb_top - _yb_bottom, 1e-9)
+            _lbl_h = 14                                # px footprint per tag
+            _last_px = None
+            for _yv, _txt, _col, _fs in sorted(_am_labels, key=lambda t: t[0]):
+                _nat_px = (_yv - _yb_bottom) * _ppu    # natural position
+                _px = _nat_px
+                if _last_px is not None and _px < _last_px + _lbl_h:
+                    _px = _last_px + _lbl_h
+                fig_am.add_annotation(
+                    xref='paper', x=1.0, xanchor='right',
+                    y=_yv, yref='y', yanchor='middle', yshift=_px - _nat_px,
+                    text=_txt, showarrow=False,
+                    font=dict(color=_col, size=_fs),
+                    bgcolor='rgba(14,17,23,0.6)',
+                )
+                _last_px = _px
 
             # ── Spot marker ────────────────────────────────────────────────
             if _am_spot_ax is not None:
