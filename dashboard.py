@@ -103,12 +103,58 @@ from strategies.ma_crossover import generate_signals, current_signal
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
+def _detect_mobile() -> bool:
+    """True when the requesting browser is a phone (user-agent sniff).
+
+    st.context.headers carries the live request's headers on Streamlit
+    >= 1.37; on anything older (or any failure) we assume desktop.
+    """
+    try:
+        ua = st.context.headers.get('User-Agent', '') or ''
+        return any(k in ua for k in ('iPhone', 'Android', 'Mobile'))
+    except Exception:
+        return False
+
+
+IS_MOBILE = _detect_mobile()
+
 st.set_page_config(
     page_title="Trading Dashboard",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # On a phone the sidebar overlays the whole screen — start it collapsed
+    # there so the chart is the first thing visible.
+    initial_sidebar_state="collapsed" if IS_MOBILE else "expanded",
 )
+
+# Touch-native Plotly config, used for every chart on the site. scrollZoom
+# enables pinch-zoom on phones (and wheel-zoom on desktop); pan as the drag
+# mode on mobile because drawing a zoom-box with a finger is miserable;
+# double-tap resets the view.
+PLOTLY_CONFIG = {
+    'displaylogo': False,
+    'scrollZoom': True,
+    'doubleClick': 'reset',
+    'modeBarButtonsToRemove': ['lasso2d', 'select2d', 'autoScale2d'],
+    'responsive': True,
+}
+
+
+def mobilize(fig, height_mobile=None):
+    """Apply the phone layout to a figure (no-op on desktop): tighter
+    margins (the right label gutter eats a third of a phone screen), smaller
+    fonts, finger-drag panning, and optionally a shorter height."""
+    if not IS_MOBILE:
+        return fig
+    fig.update_layout(
+        dragmode='pan',
+        margin=dict(l=40, r=70, t=40, b=20),
+        font=dict(size=10),
+        hoverlabel=dict(font_size=11),
+    )
+    if height_mobile:
+        fig.update_layout(height=height_mobile)
+    return fig
 
 # ---------------------------------------------------------------------------
 # Sidebar navigation
@@ -1278,7 +1324,7 @@ elif page == '📊 Stock Chart':
     if show_zscore:
         fig.update_yaxes(nticks=5, title_text='', row=4, col=1)
 
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, width='stretch', config=PLOTLY_CONFIG)
 
     # ── Volume Profile Key Levels ─────────────────────────────────────────
     if show_vol_profile:
@@ -1509,7 +1555,7 @@ elif page == '🔁 Backtest':
         )
         eq_fig.update_xaxes(gridcolor='#1e2130')
         eq_fig.update_yaxes(gridcolor='#1e2130')
-        st.plotly_chart(eq_fig)
+        st.plotly_chart(eq_fig, width='stretch', config=PLOTLY_CONFIG)
 
         # ── Advanced Metrics ──────────────────────────────────────────────
         from backtest import compute_advanced_metrics, monte_carlo_simulation
@@ -1556,7 +1602,7 @@ elif page == '🔁 Backtest':
         )
         dd_fig.update_xaxes(gridcolor='#1e2130')
         dd_fig.update_yaxes(gridcolor='#1e2130')
-        st.plotly_chart(dd_fig, width='stretch')
+        st.plotly_chart(dd_fig, width='stretch', config=PLOTLY_CONFIG)
 
         # ── Trade P&L Distribution + Monthly Returns ─────────────────────
         dist_col, heat_col = st.columns(2)
@@ -1577,7 +1623,7 @@ elif page == '🔁 Backtest':
                 )
                 hist_fig.update_xaxes(gridcolor='#1e2130')
                 hist_fig.update_yaxes(gridcolor='#1e2130')
-                st.plotly_chart(hist_fig, width='stretch')
+                st.plotly_chart(hist_fig, width='stretch', config=PLOTLY_CONFIG)
             else:
                 st.info('No completed trades to display.')
 
@@ -1607,7 +1653,7 @@ elif page == '🔁 Backtest':
                     paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
                     font=dict(color='#fafafa'),
                 )
-                st.plotly_chart(hm_fig, width='stretch')
+                st.plotly_chart(hm_fig, width='stretch', config=PLOTLY_CONFIG)
             else:
                 st.info('Need at least 3 months of data for heatmap.')
 
@@ -1633,7 +1679,7 @@ elif page == '🔁 Backtest':
             )
             rs_fig.update_xaxes(gridcolor='#1e2130')
             rs_fig.update_yaxes(gridcolor='#1e2130')
-            st.plotly_chart(rs_fig, width='stretch')
+            st.plotly_chart(rs_fig, width='stretch', config=PLOTLY_CONFIG)
 
         # ── Monte Carlo ───────────────────────────────────────────────────
         with st.expander('Monte Carlo Analysis'):
@@ -1661,7 +1707,7 @@ elif page == '🔁 Backtest':
                     )
                     mc_fig.update_xaxes(gridcolor='#1e2130')
                     mc_fig.update_yaxes(gridcolor='#1e2130')
-                    st.plotly_chart(mc_fig, width='stretch')
+                    st.plotly_chart(mc_fig, width='stretch', config=PLOTLY_CONFIG)
 
         # ── Walk-Forward Validation + Alpha Scorecard ─────────────────────
         with st.expander('Walk-Forward Validation & Alpha Scorecard'):
@@ -2578,7 +2624,8 @@ elif page == '🔬 Fractal & Options':
             # topmost tags (call wall / seller objective near the range high)
             # get pushed out of the chart area. Lines stay at their exact
             # prices — only the text tags fan apart.
-            _plot_px = 640 - 120                       # chart height minus margins
+            _yb_h = 520 if IS_MOBILE else 640
+            _plot_px = _yb_h - 120                     # chart height minus margins
             _ppu = _plot_px / max(_yb_top - _yb_bottom, 1e-9)
             _lbl_h = 14                                # px footprint per tag
             _ordered = sorted(_am_labels, key=lambda t: t[0])
@@ -2668,7 +2715,7 @@ elif page == '🔬 Fractal & Options':
                     _yb_breaks.append(dict(bounds=[16, 9.5], pattern='hour'))
 
             fig_am.update_layout(
-                height=640, template='plotly_dark',
+                height=_yb_h, template='plotly_dark',
                 paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
                 font=dict(color='#fafafa'),
                 xaxis_rangeslider_visible=False,
@@ -2678,7 +2725,8 @@ elif page == '🔬 Fractal & Options':
             )
             fig_am.update_xaxes(gridcolor='#1e2130', rangebreaks=_yb_breaks)
             fig_am.update_yaxes(gridcolor='#1e2130', range=[_yb_bottom, _yb_top])
-            st.plotly_chart(fig_am, use_container_width=True, key='yb_chart')
+            mobilize(fig_am)
+            st.plotly_chart(fig_am, use_container_width=True, key='yb_chart', config=PLOTLY_CONFIG)
 
             _yb_footer = (
                 f"Value box {_am_fmt(_am_floor1)} – {_am_fmt(_am_ceil1)}  ·  "
@@ -2975,7 +3023,8 @@ elif page == '🔬 Fractal & Options':
         )
         fig_frac.update_xaxes(gridcolor='#1e2130')
         fig_frac.update_yaxes(gridcolor='#1e2130')
-        st.plotly_chart(fig_frac)
+        mobilize(fig_frac, height_mobile=560)
+        st.plotly_chart(fig_frac, width='stretch', config=PLOTLY_CONFIG)
 
         # ── Vectors / Neurals tables + confluence factor list ──────────────
         st.markdown('**Vectors, Neurals & Confluence**')
@@ -3072,7 +3121,8 @@ elif page == '🔬 Fractal & Options':
             )
             fig_gex.update_xaxes(gridcolor='#1e2130')
             fig_gex.update_yaxes(gridcolor='#1e2130')
-            st.plotly_chart(fig_gex)
+            mobilize(fig_gex, height_mobile=300)
+            st.plotly_chart(fig_gex, width='stretch', config=PLOTLY_CONFIG)
 
             # GEX summary
             total_gex = gex_df['net_gex'].sum()
@@ -3108,7 +3158,8 @@ elif page == '🔬 Fractal & Options':
                 )
                 fig_cw.update_xaxes(gridcolor='#1e2130')
                 fig_cw.update_yaxes(gridcolor='#1e2130')
-                st.plotly_chart(fig_cw)
+                mobilize(fig_cw)
+                st.plotly_chart(fig_cw, width='stretch', config=PLOTLY_CONFIG)
             else:
                 st.info('No significant call walls found.')
 
@@ -3129,7 +3180,8 @@ elif page == '🔬 Fractal & Options':
                 )
                 fig_pw.update_xaxes(gridcolor='#1e2130')
                 fig_pw.update_yaxes(gridcolor='#1e2130')
-                st.plotly_chart(fig_pw)
+                mobilize(fig_pw)
+                st.plotly_chart(fig_pw, width='stretch', config=PLOTLY_CONFIG)
             else:
                 st.info('No significant put walls found.')
 
