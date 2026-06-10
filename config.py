@@ -148,6 +148,11 @@ GSHEET_PIN_OUTCOMES_SHEET = "PinOutcomes"
 # recorders + every dashboard Analyze), so the chart can draw each run's levels
 # as its own line and the floor/ceiling migration is visible through the day.
 GSHEET_LEVELS_SHEET = "LevelsHistory"
+# ML-ready point-in-time feature snapshots: one wide row per scheduled run
+# (pre_open 6:25am PT / post_close 1:16pm PT) capturing dealer positioning,
+# vol state, overnight context, trend structure, and realized outcomes — the
+# training data for improving the forecast model. See feature_log.py.
+GSHEET_FEATURES_SHEET = "FeatureLog"
 
 # ── Track-Record Grading ─────────────────────────────────────────────────
 # A dealer-pin close forecast is only "skillful" if it beats the naive

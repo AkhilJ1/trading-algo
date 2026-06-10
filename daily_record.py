@@ -147,6 +147,12 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
     except Exception as e:
         print(f"  [{ticker}] levels snapshot failed ({e}) — prediction still recorded")
 
+    # ML-ready point-in-time feature snapshot: today's realized OHLCV /
+    # range-vs-expected-move / close-location outcomes plus the overnight
+    # dealer state for the next session. Never blocks the recording.
+    from feature_log import log_features
+    log_features(result, "post_close", sheets_ok, vix_val=vix_val, vix_regime=regime)
+
     dest = "Google Sheets" if (sheets_ok and logged) else "local CSV"
     est_str = f"  est-close ${est_close:.2f}" if est_close is not None else ""
     print(

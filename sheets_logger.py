@@ -20,6 +20,7 @@ from config import (
     GSHEET_PIN_FORECASTS_SHEET,
     GSHEET_PIN_OUTCOMES_SHEET,
     GSHEET_LEVELS_SHEET,
+    GSHEET_FEATURES_SHEET,
     SIGNAL_WEIGHTS,
 )
 
@@ -658,3 +659,73 @@ def read_levels_history_csv(path_name="levels_history.csv") -> pd.DataFrame:
         except Exception:
             pass
     return pd.DataFrame(columns=LEVELS_HEADERS)
+
+
+# ── Feature log (ML-ready point-in-time snapshots) ────────────────────────
+# One wide row per scheduled run; see feature_log.py for what each block of
+# columns means and the research behind it. date/timestamp are Pacific.
+
+FEATURE_HEADERS = [
+    "date", "timestamp", "session", "ticker", "expiry", "dte",
+    "spot", "spot_source", "chain_source", "stale",
+    "floor", "ceiling", "bias", "confidence", "est_close", "pin_target",
+    "gex_net", "gamma_strength", "gamma_pin_strike", "pull_fraction",
+    "gex_floor", "gex_ceiling", "max_pain", "dist_max_pain_pct",
+    "call_wall", "put_wall", "pcr_oi", "pcr_volume", "skew_ratio",
+    "iv_used", "daily_em", "em_1sigma", "vrp_pct", "parkinson_rv",
+    "vix", "vix_3m", "vix_term_ratio", "vix_regime",
+    "fractal_dim", "regime",
+    "dist_sma20_pct", "dist_sma50_pct", "dist_sma200_pct",
+    "mom_1m_sign", "mom_3m_sign", "mom_6m_sign", "mom_12m_sign", "rsi14",
+    "prior_close", "gap_pct", "ovn_high", "ovn_low", "ovn_range_pct",
+    "bar_date", "bar_close", "bar_ret_pct", "bar_range_pct", "bar_clv",
+    "bar_volume", "vol_vs_20d", "range_vs_em",
+]
+
+
+def _feature_row_list(row: dict):
+    now = pacific_now()
+    stamped = dict(row)
+    stamped.setdefault("date", now.strftime("%Y-%m-%d"))
+    stamped.setdefault("timestamp", now.strftime("%Y-%m-%d %H:%M:%S"))
+    return _json_safe([
+        "" if stamped.get(h) is None else stamped.get(h, "")
+        for h in FEATURE_HEADERS
+    ])
+
+
+def log_feature_row(row: dict) -> bool:
+    """Append one feature row to the FeatureLog sheet. Returns True on success."""
+    try:
+        ss = get_spreadsheet()
+        ws = _ensure_sheet(ss, GSHEET_FEATURES_SHEET, FEATURE_HEADERS)
+        ws.append_row(_feature_row_list(row), value_input_option="RAW")
+        return True
+    except Exception as e:
+        print(f"[sheets_logger] Error logging feature row: {e}")
+        return False
+
+
+def log_feature_row_csv(row: dict, path_name="feature_log.csv") -> bool:
+    """Fallback: append one feature row to data/feature_log.csv."""
+    return _append_csv(_data_path(path_name), FEATURE_HEADERS, _feature_row_list(row))
+
+
+def read_feature_log() -> pd.DataFrame:
+    """Read the feature log from the sheet (or local CSV when absent)."""
+    try:
+        ss = get_spreadsheet()
+        ws = _ensure_sheet(ss, GSHEET_FEATURES_SHEET, FEATURE_HEADERS)
+        data = ws.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=FEATURE_HEADERS)
+        return pd.DataFrame(data)
+    except Exception as e:
+        print(f"[sheets_logger] Error reading feature log: {e}")
+        path = _data_path("feature_log.csv")
+        if os.path.exists(path):
+            try:
+                return pd.read_csv(path)
+            except Exception:
+                pass
+        return pd.DataFrame(columns=FEATURE_HEADERS)
