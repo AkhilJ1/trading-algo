@@ -58,6 +58,64 @@ def test_gex_profile_matches_formula_per_strike():
         assert row['call_gex'] == pytest.approx(exp_call, rel=1e-6)
         assert row['put_gex'] == pytest.approx(exp_put, rel=1e-6)
         assert row['net_gex'] == pytest.approx(exp_call + exp_put, rel=1e-6)
+        # Strike-evaluated twin: same notional with gamma (and notional scale)
+        # taken at S=K — the hedge flow that materializes AT the strike.
+        exp_call_k = _hand_gamma(k, k, T, R, c.impliedVolatility) * c.openInterest * 100 * k
+        exp_put_k = -_hand_gamma(k, k, T, R, p.impliedVolatility) * p.openInterest * 100 * k
+        assert row['call_gex_k'] == pytest.approx(exp_call_k, rel=1e-6)
+        assert row['put_gex_k'] == pytest.approx(exp_put_k, rel=1e-6)
+        assert row['net_gex_k'] == pytest.approx(exp_call_k + exp_put_k, rel=1e-6)
+
+
+def _realistic_0dte_chain(wall_call=745.0, wall_put=725.0):
+    """SPY-like chain: OI clusters near the money, modest (2.5x) walls."""
+    strikes = [float(k) for k in range(705, 766)]
+    def oi(k, wall):
+        base = 8000 * math.exp(-abs(k - 735) / 12)
+        if k % 5 == 0:
+            base *= 1.8
+        if k == wall:
+            base *= 2.5
+        return int(base) + 100
+    calls = pd.DataFrame({'strike': strikes,
+                          'openInterest': [oi(k, wall_call) for k in strikes],
+                          'impliedVolatility': [0.15] * len(strikes),
+                          'volume': [1000] * len(strikes)})
+    puts = pd.DataFrame({'strike': strikes,
+                         'openInterest': [oi(k, wall_put) for k in strikes],
+                         'impliedVolatility': [0.15] * len(strikes),
+                         'volume': [1000] * len(strikes)})
+    return calls, puts
+
+
+def test_strike_evaluated_gex_levels_do_not_chase_spot():
+    """REGRESSION (the 'pivot snaps to spot' bug).
+
+    Spot-evaluated gamma is a near-delta-spike at the ATM strike on a 0DTE
+    chain, so the max-|net_gex| strike is simply whatever strike is nearest
+    spot — every level derived from it tracked the tape instead of the OI
+    structure. The strike-evaluated profile must rank the same strikes
+    regardless of where spot sits.
+    """
+    calls, puts = _realistic_0dte_chain()
+    now = datetime(2026, 6, 9, 13, 0)   # 0DTE, 3h to the close
+    expiry = '2026-06-09'
+
+    magnets_spot_eval, magnets_strike_eval = [], []
+    for spot in (727.0, 731.0, 735.0, 739.0, 743.0):
+        gex = compute_gex_profile(calls, puts, spot, expiry, now_et=now)
+        old = gex.loc[gex['net_gex'].abs().idxmax(), 'strike']
+        new = gex.loc[gex['net_gex_k'].abs().idxmax(), 'strike']
+        magnets_spot_eval.append(float(old))
+        magnets_strike_eval.append(float(new))
+
+    # The spot-evaluated max strike moves around as spot moves (the bug being
+    # pinned: gamma weighting depends on where spot currently sits)...
+    assert len(set(magnets_spot_eval)) > 1
+    # ...the strike-evaluated column identifies ONE structural strike — the
+    # biggest OI wall — for all five spots.
+    assert len(set(magnets_strike_eval)) == 1
+    assert magnets_strike_eval[0] == 725.0
 
 
 def test_quality_gate_excludes_dead_iv_and_zero_oi():

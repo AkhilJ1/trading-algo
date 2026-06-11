@@ -69,6 +69,23 @@ def test_unreachable_pin_is_clamped_to_expected_move_envelope():
     assert out['confidence'] < 90
 
 
+def test_gamma_magnet_prefers_strike_evaluated_gex():
+    """REGRESSION (pivot-snaps-to-spot): when the profile carries the
+    spot-invariant strike-evaluated column (net_gex_k), the magnet must come
+    from it — net_gex peaks at whatever strike is nearest spot (a
+    near-delta-spike on 0DTE) and made the pin chase the tape."""
+    gex = pd.DataFrame([
+        # net_gex says the magnet is the ATM 600 strike (spot-gamma artifact);
+        # net_gex_k says the dealer commitment actually lives at 610.
+        {'strike': 600.0, 'net_gex': 9e8, 'net_gex_k': 2e8},
+        {'strike': 610.0, 'net_gex': 1e8, 'net_gex_k': 8e8},
+    ])
+    out = compute_dealer_pin_close(SPOT, 601.0, gex, FRACTALS, IV_RANGE, 'transitional')
+    assert out['gamma_pin_strike'] == 610.0
+    # Aggregate regime still reads the spot-evaluated column.
+    assert out['gamma_strength'] == 1.0
+
+
 def test_empty_gex_falls_back_to_max_pain_anchor():
     """No usable gamma profile => anchor on max-pain with the default pull."""
     out = compute_dealer_pin_close(SPOT, 599.0, pd.DataFrame(), FRACTALS, IV_RANGE, 'transitional')

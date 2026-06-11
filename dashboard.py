@@ -3281,9 +3281,13 @@ elif page == '🔬 Fractal & Options':
             mobilize(fig_gex, height_mobile=300)
             st.plotly_chart(fig_gex, width='stretch', config=PLOTLY_CONFIG)
 
-            # GEX summary
+            # GEX summary. The headline strike uses STRIKE-evaluated GEX
+            # (net_gex_k) when available: the spot-evaluated profile peaks at
+            # the money by construction, so its max strike is just "wherever
+            # spot is right now" — not a level.
             total_gex = gex_df['net_gex'].sum()
-            max_gex_strike = gex_df.loc[gex_df['net_gex'].abs().idxmax(), 'strike'] if not gex_df.empty else 0
+            _lvl_col = 'net_gex_k' if 'net_gex_k' in gex_df.columns else 'net_gex'
+            max_gex_strike = gex_df.loc[gex_df[_lvl_col].abs().idxmax(), 'strike'] if not gex_df.empty else 0
             g1, g2, g3 = st.columns(3)
             g1.metric('Total Net GEX', f"${total_gex:,.0f}")
             g2.metric('GEX Regime', 'Sticky' if total_gex > 0 else 'Slippery')

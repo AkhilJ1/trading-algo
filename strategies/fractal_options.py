@@ -173,11 +173,16 @@ def compute_vix_term_structure() -> dict:
 def compute_gex_boundaries(gex_df: pd.DataFrame, spot: float) -> dict:
     """
     Extract GEX-weighted support/resistance boundaries from the GEX profile.
+
+    Uses strike-evaluated GEX (net_gex_k) when available: spot-evaluated
+    gamma peaks at the ATM strike, so boundaries built from it just hug spot
+    instead of marking where the dealer hedge flow actually concentrates.
     """
     if gex_df.empty or 'net_gex' not in gex_df.columns:
         return {'gex_floor': None, 'gex_ceiling': None}
+    col = _gex_level_col(gex_df)
 
-    total_abs = gex_df['net_gex'].abs().sum()
+    total_abs = gex_df[col].abs().sum()
     if total_abs == 0:
         return {'gex_floor': None, 'gex_ceiling': None}
 
@@ -187,14 +192,14 @@ def compute_gex_boundaries(gex_df: pd.DataFrame, spot: float) -> dict:
     def _weighted(sub):
         if sub.empty:
             return None
-        w = sub['net_gex'].abs()
+        w = sub[col].abs()
         if w.sum() == 0:
             return None
         return float(np.average(sub['strike'], weights=w))
 
     # Use top 5 by absolute GEX for each side
-    gex_ceiling = _weighted(above.nlargest(5, 'net_gex') if len(above) > 5 else above)
-    gex_floor = _weighted(below.reindex(below['net_gex'].abs().nlargest(5).index) if len(below) > 5 else below)
+    gex_ceiling = _weighted(above.nlargest(5, col) if len(above) > 5 else above)
+    gex_floor = _weighted(below.reindex(below[col].abs().nlargest(5).index) if len(below) > 5 else below)
 
     return {
         'gex_floor': round(gex_floor, 2) if gex_floor else None,
@@ -247,17 +252,32 @@ def compute_gex_profile(
     now_et: Optional[datetime] = None,
 ) -> pd.DataFrame:
     """
-    Compute Gamma Exposure (GEX) per strike.
+    Compute Gamma Exposure (GEX) per strike, in two evaluations:
 
-    Standard naive dealer-positioning convention (dealers long the calls
-    customers sold, short the puts customers bought):
-      Call GEX = +gamma * OI * 100 * spot  (dealers dampen — buy dips/sell rips)
-      Put GEX  = -gamma * OI * 100 * spot  (dealers amplify — sell drops)
-    Units: $ of dealer hedge notional per $1 move in the underlying.
+    SPOT-EVALUATED (call_gex / put_gex / net_gex) — standard naive dealer
+    convention (dealers long the calls customers sold, short the puts
+    customers bought):
+      Call GEX = +gamma(S=spot) * OI * 100 * spot  (dealers dampen)
+      Put GEX  = -gamma(S=spot) * OI * 100 * spot  (dealers amplify)
+    Units: $ of dealer hedge notional per $1 move. Correct for AGGREGATE
+    measures (net regime sign, gamma_strength) — dealer gamma really is
+    concentrated at the money. But it is useless for picking *which strike*
+    is a magnet/wall: BS gamma evaluated at spot peaks at the ATM strike by
+    construction (a near-delta-spike on 0DTE), so "max |net_gex| strike"
+    degenerates to "whatever strike is closest to spot" and any level
+    derived from it chases the tape all day.
+
+    STRIKE-EVALUATED (call_gex_k / put_gex_k / net_gex_k) — the same notional
+    with gamma evaluated AT the strike (S=K): the hedge flow that materializes
+    when price actually trades at that strike. This is spot-invariant and
+    driven by the OI structure, which is what level identification (gamma
+    magnet, GEX walls, floor/ceiling candidates) must use.
+
     OI is the overnight-settled figure (same-day 0DTE opens are invisible
     until the next settle — inherent to every OI-based GEX).
 
-    Returns DataFrame: strike, call_gex, put_gex, net_gex
+    Returns DataFrame: strike, call_gex, put_gex, net_gex,
+                       call_gex_k, put_gex_k, net_gex_k
     """
     T = _gex_time_to_expiry(expiry_str, now_et=now_et)
 
@@ -273,30 +293,39 @@ def compute_gex_profile(
         call_row = c[c['strike'] == strike]
         put_row = p[p['strike'] == strike]
 
-        call_gex = 0.0
+        call_gex = call_gex_k = 0.0
         if not call_row.empty:
             iv = float(call_row['impliedVolatility'].iloc[0])
             oi = float(call_row['openInterest'].iloc[0])
             if iv > 0.05 and oi > 0:  # require at least 5% IV
-                g = _bs_gamma(spot, strike, T, r, iv)
-                call_gex = g * oi * 100 * spot
+                call_gex = _bs_gamma(spot, strike, T, r, iv) * oi * 100 * spot
+                call_gex_k = _bs_gamma(strike, strike, T, r, iv) * oi * 100 * strike
 
-        put_gex = 0.0
+        put_gex = put_gex_k = 0.0
         if not put_row.empty:
             iv = float(put_row['impliedVolatility'].iloc[0])
             oi = float(put_row['openInterest'].iloc[0])
             if iv > 0.05 and oi > 0:  # require at least 5% IV
-                g = _bs_gamma(spot, strike, T, r, iv)
-                put_gex = -g * oi * 100 * spot
+                put_gex = -_bs_gamma(spot, strike, T, r, iv) * oi * 100 * spot
+                put_gex_k = -_bs_gamma(strike, strike, T, r, iv) * oi * 100 * strike
 
         rows.append({
             'strike': strike,
             'call_gex': round(call_gex, 2),
             'put_gex': round(put_gex, 2),
             'net_gex': round(call_gex + put_gex, 2),
+            'call_gex_k': round(call_gex_k, 2),
+            'put_gex_k': round(put_gex_k, 2),
+            'net_gex_k': round(call_gex_k + put_gex_k, 2),
         })
 
     return pd.DataFrame(rows)
+
+
+def _gex_level_col(gex_df: pd.DataFrame) -> str:
+    """Column to use for per-strike LEVEL identification: the spot-invariant
+    strike-evaluated GEX when present, else net_gex (hand-built frames)."""
+    return 'net_gex_k' if 'net_gex_k' in gex_df.columns else 'net_gex'
 
 
 def compute_options_walls(
@@ -607,7 +636,10 @@ def _collect_level_candidates(spot, side, gex_df=None, walls=None,
     side='ceiling' → levels at/above spot (resistance candidates)
 
     Sources (the MM-tool reading: dealer positioning first, structure second):
-      'gex'     — top per-strike |net GEX| strikes (dealer hedging flips there)
+      'gex'     — top per-strike |GEX| strikes, STRIKE-evaluated (net_gex_k)
+                  when available — spot-evaluated gamma peaks at the money,
+                  so its top strikes are always the ones hugging spot, not
+                  the defended OI concentrations
       'oi_wall' — highest-activity OI strikes
       'neural'  — multi-bounce horizontal zones (strength-gated)
       'fractal' — recent Williams pivot levels
@@ -619,10 +651,11 @@ def _collect_level_candidates(spot, side, gex_df=None, walls=None,
     out = []
 
     if gex_df is not None and not gex_df.empty and 'net_gex' in gex_df.columns:
+        col = _gex_level_col(gex_df)
         sub = gex_df[gex_df['strike'] < spot] if below else gex_df[gex_df['strike'] > spot]
-        sub = sub[sub['net_gex'].abs() > 0]
+        sub = sub[sub[col].abs() > 0]
         if not sub.empty:
-            top = sub.reindex(sub['net_gex'].abs().nlargest(3).index)
+            top = sub.reindex(sub[col].abs().nlargest(3).index)
             out.extend((float(s), 'gex') for s in top['strike'])
 
     if walls:
@@ -922,6 +955,12 @@ def compute_dealer_pin_close(
         horizon_em = spot * 0.01
 
     # 1. Gamma magnet + how dominant *positive* (sticky) gamma is.
+    #    gamma_strength stays SPOT-evaluated (aggregate dealer gamma really is
+    #    concentrated at the money — that is the regime), but the magnet
+    #    STRIKE must come from strike-evaluated GEX: spot-evaluated gamma is a
+    #    near-delta-spike at the ATM strike (extreme on 0DTE), so the old
+    #    "max positive net_gex strike" was just "the strike nearest spot" and
+    #    dragged the pin estimate onto the live price all session.
     pin_strike = None
     gamma_strength = 0.5  # 0 = all short gamma (slippery), 1 = all long gamma (sticky)
     if gex_df is not None and not gex_df.empty and 'net_gex' in gex_df.columns:
@@ -929,9 +968,10 @@ def compute_dealer_pin_close(
         total_abs = float(net.abs().sum())
         if total_abs > 0:
             gamma_strength = float(net[net > 0].sum() / total_abs)
-        pos_rows = gex_df[gex_df['net_gex'] > 0]
+        col = _gex_level_col(gex_df)
+        pos_rows = gex_df[gex_df[col] > 0]
         if not pos_rows.empty:
-            pin_strike = float(pos_rows.loc[pos_rows['net_gex'].idxmax(), 'strike'])
+            pin_strike = float(pos_rows.loc[pos_rows[col].idxmax(), 'strike'])
 
     # 2. Pin anchor: max-pain blended with the gamma magnet. The stronger the
     #    long-gamma regime, the more the gamma strike matters.
