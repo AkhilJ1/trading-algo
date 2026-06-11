@@ -13,6 +13,7 @@ import pandas as pd
 from config import (
     LEVEL_SNAP_BLEND_BASE, LEVEL_SNAP_BLEND_STEP, LEVEL_SNAP_BLEND_MAX,
     LEVEL_SNAP_MIN_SIGMA, LEVEL_SNAP_MAX_SIGMA,
+    CONFIDENCE_SIGMAS, PRIMARY_BAND_LABEL,
 )
 from strategies.fractal_options import (
     _compute_floor_ceiling, _collect_level_candidates, _snap_level,
@@ -21,7 +22,12 @@ from strategies.fractal_options import (
 
 
 SPOT = 100.0
-BASE_MOVE = 2.0   # with neutral factors below, final_move == 2.0 → 1σ band 98–102
+BASE_MOVE = 2.0   # with neutral factors below, final_move == 2.0
+# The primary (Yellow Box) floor/ceiling starts from the PRIMARY_BAND_LABEL
+# band edge (1.5σ → 97/103 here), not the 1σ band.
+PRIM_SIGMA = CONFIDENCE_SIGMAS[PRIMARY_BAND_LABEL]
+FLOOR_EDGE = SPOT - PRIM_SIGMA * BASE_MOVE
+CEIL_EDGE = SPOT + PRIM_SIGMA * BASE_MOVE
 
 
 def _neutral_inputs():
@@ -54,10 +60,19 @@ def _fc(**snap_kwargs):
 
 def test_no_candidates_keeps_iv_band():
     out = _fc()
-    assert out['floor'] == 98.0
-    assert out['ceiling'] == 102.0
+    assert out['floor'] == FLOOR_EDGE
+    assert out['ceiling'] == CEIL_EDGE
     assert out['methodology']['floor_basis'] is None
     assert out['methodology']['ceiling_basis'] is None
+
+
+def test_primary_band_is_the_yellow_box_band_not_1sigma():
+    # Milk-RCG yellow box = ~80–90% containment → the primary floor/ceiling
+    # starts from the 1.5σ (~86.6%) edge, not the 68% 1σ edge.
+    out = _fc()
+    assert out['floor'] == out['ranges'][PRIMARY_BAND_LABEL]['floor']
+    assert out['ceiling'] == out['ranges'][PRIMARY_BAND_LABEL]['ceiling']
+    assert out['floor'] != out['ranges']['1sigma']['floor']
 
 
 def test_ranges_envelope_is_never_snapped():
@@ -65,28 +80,30 @@ def test_ranges_envelope_is_never_snapped():
     # Primary floor/ceiling moved, the sigma envelope did not.
     assert out['ranges']['1sigma']['floor'] == 98.0
     assert out['ranges']['1sigma']['ceiling'] == 102.0
-    assert out['floor'] != 98.0
-    assert out['ceiling'] != 102.0
+    assert out['ranges'][PRIMARY_BAND_LABEL]['floor'] == FLOOR_EDGE
+    assert out['ranges'][PRIMARY_BAND_LABEL]['ceiling'] == CEIL_EDGE
+    assert out['floor'] != FLOOR_EDGE
+    assert out['ceiling'] != CEIL_EDGE
 
 
 # ── single-source snap ───────────────────────────────────────────────────────
 
 def test_single_gex_strike_pulls_floor_halfway():
     out = _fc(gex_df=_gex_df([(98.5, -5e9)]))
-    expected = round(98.0 * (1 - LEVEL_SNAP_BLEND_BASE) + 98.5 * LEVEL_SNAP_BLEND_BASE, 2)
+    expected = round(FLOOR_EDGE * (1 - LEVEL_SNAP_BLEND_BASE) + 98.5 * LEVEL_SNAP_BLEND_BASE, 2)
     assert out['floor'] == expected
     basis = out['methodology']['floor_basis']
     assert basis['sources'] == ['gex']
     assert basis['level'] == 98.5
-    assert out['ceiling'] == 102.0          # no candidates above spot
+    assert out['ceiling'] == CEIL_EDGE      # no candidates above spot
 
 
 def test_ceiling_side_is_symmetric():
     out = _fc(gex_df=_gex_df([(101.6, 4e9)]))
-    expected = round(102.0 * (1 - LEVEL_SNAP_BLEND_BASE) + 101.6 * LEVEL_SNAP_BLEND_BASE, 2)
+    expected = round(CEIL_EDGE * (1 - LEVEL_SNAP_BLEND_BASE) + 101.6 * LEVEL_SNAP_BLEND_BASE, 2)
     assert out['ceiling'] == expected
     assert out['methodology']['ceiling_basis']['sources'] == ['gex']
-    assert out['floor'] == 98.0
+    assert out['floor'] == FLOOR_EDGE
 
 
 # ── confluence raises the snap weight ────────────────────────────────────────
@@ -113,11 +130,11 @@ def test_confluent_sources_snap_harder_than_one():
 # ── window discipline ────────────────────────────────────────────────────────
 
 def test_levels_outside_snap_window_are_ignored():
-    # final_move = 2.0 → floor window is [spot - 1.6*2, spot - 0.35*2] = [96.8, 99.3]
+    # final_move = 2.0 → floor window is [spot - 2.0*2, spot - 0.35*2] = [96.0, 99.3]
     too_close = SPOT - LEVEL_SNAP_MIN_SIGMA * BASE_MOVE + 0.2   # 99.5
-    too_far = SPOT - LEVEL_SNAP_MAX_SIGMA * BASE_MOVE - 0.5     # 96.3
+    too_far = SPOT - LEVEL_SNAP_MAX_SIGMA * BASE_MOVE - 0.5     # 95.5
     out = _fc(gex_df=_gex_df([(too_close, -5e9), (too_far, -4e9)]))
-    assert out['floor'] == 98.0
+    assert out['floor'] == FLOOR_EDGE
     assert out['methodology']['floor_basis'] is None
 
 
