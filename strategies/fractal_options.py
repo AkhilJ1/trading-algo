@@ -32,7 +32,7 @@ from config import (
     NEURAL_BRACKET_MIN_STRENGTH,
     LEVEL_SNAP_TOLERANCE_PCT, LEVEL_SNAP_MIN_SIGMA, LEVEL_SNAP_MAX_SIGMA,
     LEVEL_SNAP_BLEND_BASE, LEVEL_SNAP_BLEND_STEP, LEVEL_SNAP_BLEND_MAX,
-    PIN_BRACKET_MIN_SIGMA, REACTION_MIN_DISTANCE_PCT,
+    PIN_BRACKET_MIN_SIGMA, REACTION_MIN_DISTANCE_PCT, PRIMARY_BAND_LABEL,
 )
 from options_fetcher import fetch_options_chain, fetch_expiration_dates
 from sheets_logger import pacific_now
@@ -755,8 +755,9 @@ def _snap_level(spot, raw_edge, final_move, candidates, side):
     raw 1-sigma band edge toward it.
 
     Window: LEVEL_SNAP_MIN_SIGMA..LEVEL_SNAP_MAX_SIGMA final-moves from spot —
-    a "floor" sitting on top of spot is noise, and one beyond ~1.6 sigma is a
-    worse estimate than the calibrated band. Candidates within
+    a "floor" sitting on top of spot is noise, and one beyond the ~2-sigma
+    buyer/seller objectives is a worse estimate than the calibrated band.
+    Candidates within
     LEVEL_SNAP_TOLERANCE_PCT of each other cluster into one level; clusters
     rank by how many *independent* sources back them (the Fractal-Exchange
     confluence idea), then member count, then proximity to the band edge.
@@ -807,7 +808,10 @@ def _compute_floor_ceiling(
       2. ADJUST: Scale by Variance Risk Premium (IV overstates realized vol)
       3. REGIME: Widen/narrow via fractal dimension + VIX term structure
       4. BOUND: Cap at GEX clusters + OI wall boundaries
-      5. OUTPUT: Multiple confidence levels (68%, 87%, 95%)
+      5. OUTPUT: Multiple confidence levels (68%, 87%, 95%). The PRIMARY
+         floor/ceiling (the dashboard's Yellow Box) is the
+         PRIMARY_BAND_LABEL band — 1.5σ (~86.6%), matching the Milk-RCG
+         yellow-box claim that price holds the box 80–90% of the session.
       6. SNAP: pull the primary floor/ceiling toward the strongest confluent
          dealer/structure level (per-strike GEX, OI walls, neural zones,
          fractal pivots, vectors) inside the snap window — floors and
@@ -876,7 +880,7 @@ def _compute_floor_ceiling(
             'probability': round((2 * norm.cdf(sigma) - 1) * 100, 1),
         }
 
-    primary = ranges['1sigma']
+    primary = ranges[PRIMARY_BAND_LABEL]
 
     # Step 6: snap the primary floor/ceiling to confluent evidence levels.
     floor_basis = _snap_level(

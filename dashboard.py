@@ -2263,8 +2263,9 @@ elif page == '🔬 Fractal & Options':
         st.subheader(f"{result['ticker']} — Yellow Box")
         st.caption(
             "Milk-style value/objective map. The **yellow box** is the expected "
-            "(value) zone price holds most of the session; **objectives** are the "
-            "laddered targets above and below. Above the box sellers distribute "
+            "(value) zone price holds ~80–90% of the session — the ~87% "
+            "containment band, edges snapped to defended strikes; **objectives** "
+            "are the laddered targets above and below. Above the box sellers distribute "
             "(unload inventory); below it buyers accumulate (value add). Pick a "
             "range — **1D** draws a Robinhood-style price line (1-minute, incl. "
             "pre/post-market) whose tip tracks the live quote and auto-refreshes "
@@ -2524,7 +2525,8 @@ elif page == '🔬 Fractal & Options':
                 showlegend=False, hovertemplate='%{y:.2f}<extra></extra>',
             ))
 
-            # YELLOW BOX — the value zone (1σ floor ↔ ceiling)
+            # YELLOW BOX — the value zone (primary floor ↔ ceiling: the
+            # ~87%-containment band snapped to defended strikes)
             if _am_floor1_ax is not None and _am_ceil1_ax is not None:
                 fig_am.add_hrect(
                     y0=_am_floor1_ax, y1=_am_ceil1_ax,

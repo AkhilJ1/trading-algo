@@ -99,6 +99,13 @@ CONFIDENCE_SIGMAS = {
     '2sigma':   2.0,            # ~95.4% probability
 }
 
+# Which band the PRIMARY floor/ceiling (the Yellow Box on the dashboard) is
+# built from before snapping to structure. Milk-RCG defines the yellow box as
+# the zone price holds ~80–90% of the session — that is the 1.5σ (~86.6%)
+# band, NOT the 1σ (68%) band the engine originally used, which drew a box
+# price legitimately escapes a third of the time.
+PRIMARY_BAND_LABEL = '1_5sigma'
+
 # ── Level-Snap Floor/Ceiling (Fractal-Exchange/MM-tool style) ───────────
 # The primary floor/ceiling snaps toward the strongest *confluent* level —
 # a price where independent evidence sources (per-strike GEX, OI walls,
@@ -106,7 +113,9 @@ CONFIDENCE_SIGMAS = {
 # symmetric IV band around spot. The sigma envelope in `ranges` is untouched.
 LEVEL_SNAP_TOLERANCE_PCT = 0.4  # cluster half-width (% of spot) for two levels to "agree"
 LEVEL_SNAP_MIN_SIGMA = 0.35     # ignore levels closer to spot than this (in final-move sigmas)
-LEVEL_SNAP_MAX_SIGMA = 1.60     # ignore levels farther from spot than this
+LEVEL_SNAP_MAX_SIGMA = 2.00     # ignore levels farther from spot than this — the window
+                                # brackets the 1.5σ primary edge and stops at the 2σ
+                                # buyer/seller objectives
 LEVEL_SNAP_BLEND_BASE = 0.50    # weight on the level when one source backs it
 LEVEL_SNAP_BLEND_STEP = 0.15    # extra weight per additional independent source
 LEVEL_SNAP_BLEND_MAX = 0.85     # never fully abandon the calibrated IV band edge
