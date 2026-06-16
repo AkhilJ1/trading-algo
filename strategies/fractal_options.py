@@ -799,9 +799,20 @@ def _snap_level(spot, raw_edge, final_move, candidates, side):
 def _compute_floor_ceiling(
     spot, iv_range, vrp, vix_term, gex_bounds, walls, regime, fractal_dim,
     gex_df=None, neurals=None, fractal_levels=None, vectors=None,
+    anchor=None,
 ):
     """
-    Evidence-based floor/ceiling computation.
+    Evidence-based floor/ceiling computation — the Milk-style Yellow Box.
+
+    The box is built around `anchor`, a FIXED session reference (today's open),
+    NOT the live spot. This is what lets price break OUT of the box: once the
+    live spot is more than the expected move from the anchor it sits above the
+    box (sellers distribute) or below it (buyers accumulate), exactly as Milk's
+    yellow box behaves. Centering on the live spot — the previous behavior —
+    pinned the spot permanently dead-center, so price could never leave the box
+    and re-running Analyze just made the box chase the tape. `anchor` falls back
+    to `spot` when none is supplied (pre-open, where no session has opened yet,
+    and historical range_calibration replays — both keep the old behavior).
 
     Pipeline:
       1. BASE: IV expected move (1-sigma daily)
@@ -816,9 +827,13 @@ def _compute_floor_ceiling(
          dealer/structure level (per-strike GEX, OI walls, neural zones,
          fractal pivots, vectors) inside the snap window — floors and
          ceilings live at actual defended strikes, not at a symmetric
-         distance from spot. The multi-sigma `ranges` envelope stays pure
+         distance from the anchor. The multi-sigma `ranges` envelope stays pure
          band math (range_calibration parity).
     """
+    # The value box brackets the session anchor, not wherever price is now.
+    if anchor is None or not (isinstance(anchor, (int, float)) and anchor > 0):
+        anchor = spot
+
     # Step 1: Base daily move from IV
     base_move = iv_range.get('daily_expected_move', spot * 0.01)
     iv_used = iv_range.get('iv_used', 0.20)
@@ -846,12 +861,14 @@ def _compute_floor_ceiling(
     gex_floor = gex_bounds.get('gex_floor')
     gex_ceil = gex_bounds.get('gex_ceiling')
 
-    # Best dealer boundary: blend GEX and walls
-    if gex_floor and gex_floor < spot:
+    # Best dealer boundary: blend GEX and walls. Relative to the session anchor
+    # (the box's center), so a wall/GEX cluster between the anchor and the raw
+    # band edge tightens that side of the box.
+    if gex_floor and gex_floor < anchor:
         dealer_floor = gex_floor * 0.6 + wall_floor * 0.4
     else:
         dealer_floor = wall_floor
-    if gex_ceil and gex_ceil > spot:
+    if gex_ceil and gex_ceil > anchor:
         dealer_ceil = gex_ceil * 0.6 + wall_ceil * 0.4
     else:
         dealer_ceil = wall_ceil
@@ -859,15 +876,15 @@ def _compute_floor_ceiling(
     ranges = {}
     for label, sigma in CONFIDENCE_SIGMAS.items():
         move = final_move * sigma
-        raw_floor = spot - move
-        raw_ceil = spot + move
+        raw_floor = anchor - move
+        raw_ceil = anchor + move
 
         # Bound: if dealer level is tighter than IV model, blend toward it
-        if dealer_floor > raw_floor and dealer_floor < spot:
+        if dealer_floor > raw_floor and dealer_floor < anchor:
             bounded_floor = raw_floor * (1 - blend) + dealer_floor * blend
         else:
             bounded_floor = raw_floor
-        if dealer_ceil < raw_ceil and dealer_ceil > spot:
+        if dealer_ceil < raw_ceil and dealer_ceil > anchor:
             bounded_ceil = raw_ceil * (1 - blend) + dealer_ceil * blend
         else:
             bounded_ceil = raw_ceil
@@ -883,15 +900,18 @@ def _compute_floor_ceiling(
     primary = ranges[PRIMARY_BAND_LABEL]
 
     # Step 6: snap the primary floor/ceiling to confluent evidence levels.
+    # Windowed and partitioned around the same `anchor` as the band, so a
+    # session-anchored box snaps to the defended strikes that bracket the
+    # anchor (not whichever ones happen to hug the live spot).
     floor_basis = _snap_level(
-        spot, primary['floor'], final_move,
-        _collect_level_candidates(spot, 'floor', gex_df=gex_df, walls=walls,
+        anchor, primary['floor'], final_move,
+        _collect_level_candidates(anchor, 'floor', gex_df=gex_df, walls=walls,
                                   neurals=neurals, fractal_levels=fractal_levels,
                                   vectors=vectors),
         'floor')
     ceiling_basis = _snap_level(
-        spot, primary['ceiling'], final_move,
-        _collect_level_candidates(spot, 'ceiling', gex_df=gex_df, walls=walls,
+        anchor, primary['ceiling'], final_move,
+        _collect_level_candidates(anchor, 'ceiling', gex_df=gex_df, walls=walls,
                                   neurals=neurals, fractal_levels=fractal_levels,
                                   vectors=vectors),
         'ceiling')
@@ -908,6 +928,7 @@ def _compute_floor_ceiling(
             'term_factor': term_factor,
             'total_regime': round(total_regime, 3),
             'final_move': round(final_move, 2),
+            'anchor': round(anchor, 2),
             'dealer_floor': round(dealer_floor, 2),
             'dealer_ceiling': round(dealer_ceil, 2),
             'floor_basis': floor_basis,
@@ -1275,33 +1296,40 @@ def compute_composite_analysis(
         weights=active_w,
     ))
 
-    # 6. Evidence-based floor/ceiling (replaces old weighted average)
+    # Session anchor: TODAY'S OPEN when the latest daily bar is today's. Both the
+    # value box and the dealer-pin estimate are built around this fixed session
+    # reference instead of re-centering on wherever price is right now, so
+    # intraday re-runs refresh dealer positioning without chasing the tape — and
+    # the live price can sit outside the Yellow Box. Pre-open (or a non-today
+    # bar) → None, so the callees fall back to the live spot (unchanged behavior
+    # for the pre-open recorder/grader).
+    session_anchor = None
+    try:
+        if df.index[-1].date() == pacific_now().date():
+            _open = float(df['Open'].iloc[-1])
+            if _open > 0:
+                session_anchor = _open
+    except (IndexError, KeyError, TypeError, ValueError):
+        pass
+
+    # 6. Evidence-based floor/ceiling (replaces old weighted average), centered
+    #    on the session anchor so the live spot can break out of the box.
     fc_result = _compute_floor_ceiling(
         spot=spot, iv_range=iv_range, vrp=vrp, vix_term=vix_term,
         gex_bounds=gex_bounds, walls=walls, regime=regime, fractal_dim=current_fd,
         gex_df=gex_df, neurals=neurals, fractal_levels=fractal_levels,
-        vectors=vectors,
+        vectors=vectors, anchor=session_anchor,
     )
     floor = fc_result['floor']
     ceiling = fc_result['ceiling']
 
     # 6b. Dealer-pin estimated close — where dealers are incentivized to pin
     #     price into expiry (most OI expires OTM), shaped by fractal structure.
-    #     Anchor the pull on TODAY'S OPEN when the daily bar is today's, so
-    #     intraday re-runs refresh dealer positioning without re-centering the
-    #     forecast on the live price (the estimate used to chase spot all day).
-    pin_anchor = None
-    try:
-        if df.index[-1].date() == pacific_now().date():
-            _open = float(df['Open'].iloc[-1])
-            if _open > 0:
-                pin_anchor = _open
-    except (IndexError, KeyError, TypeError, ValueError):
-        pass
+    #     Same session anchor (today's open) so the estimate stops chasing spot.
     pin_close = compute_dealer_pin_close(
         spot=spot, max_pain=max_pain_strike, gex_df=gex_df,
         fractal_levels=fractal_levels, iv_range=iv_range, regime=regime,
-        neurals=neurals, vectors=vectors, anchor_price=pin_anchor,
+        neurals=neurals, vectors=vectors, anchor_price=session_anchor,
     )
 
     # 6c. Nearest reaction levels — first defended level above/below spot,
