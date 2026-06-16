@@ -223,3 +223,30 @@ def test_reaction_level_at_spot_is_ignored():
     walls = {'put_walls': [(100.0, 9000), (98.9, 5000)], 'call_walls': []}
     rl = nearest_reaction_levels(SPOT, walls=walls)
     assert rl['support']['level'] == 98.9
+
+
+# ── buyer/seller objectives snap to walls beyond the box ─────────────────────
+
+def test_objectives_snap_to_walls_beyond_the_box():
+    # A defended strike beyond the 1.5σ box but inside the objective window
+    # (1.5σ..3σ → 103..106 above, 94..97 below) pulls the seller/buyer objective
+    # toward it. The primary box snap window (0.35σ..2σ) does NOT reach these, so
+    # floor/ceiling are unaffected, and the raw 2σ `ranges` envelope stays pure.
+    out = _fc(gex_df=_gex_df([(105.4, 6e9), (94.6, -6e9)]))
+    assert out['ranges']['2sigma']['ceiling'] == 104.0   # raw 2σ untouched
+    assert out['ranges']['2sigma']['floor'] == 96.0
+    assert out['seller_objective'] > 104.0               # snapped up toward 105.4
+    assert out['buyer_objective'] < 96.0                 # snapped down toward 94.6
+    assert out['methodology']['seller_objective_basis']['level'] == 105.4
+    assert out['methodology']['buyer_objective_basis']['level'] == 94.6
+    # The primary box edges are untouched (candidates are outside their window).
+    assert out['floor'] == FLOOR_EDGE
+    assert out['ceiling'] == CEIL_EDGE
+
+
+def test_objectives_fall_back_to_2sigma_when_no_wall_in_range():
+    out = _fc()   # no candidates anywhere
+    assert out['seller_objective'] == out['ranges']['2sigma']['ceiling']
+    assert out['buyer_objective'] == out['ranges']['2sigma']['floor']
+    assert out['methodology']['seller_objective_basis'] is None
+    assert out['methodology']['buyer_objective_basis'] is None
