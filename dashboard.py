@@ -2436,7 +2436,12 @@ elif page == '🔬 Fractal & Options':
             # ── Levels (display/target units unless noted) ─────────────────
             _am_floor1, _am_ceil1 = result.get('floor'), result.get('ceiling')
             _am_r2 = (result.get('ranges') or {}).get('2sigma', {}) or {}
-            _am_floor2, _am_ceil2 = _am_r2.get('floor'), _am_r2.get('ceiling')
+            # Buyer/Seller objectives: prefer the snapped-to-wall levels; fall
+            # back to the raw 2σ band edge when no wall was in range.
+            _am_floor2 = (result.get('buyer_objective')
+                          if result.get('buyer_objective') is not None else _am_r2.get('floor'))
+            _am_ceil2 = (result.get('seller_objective')
+                         if result.get('seller_objective') is not None else _am_r2.get('ceiling'))
 
             _am_est = result.get('estimated_close') or {}
             _am_pivot_disp = _am_est.get('estimated_close')

@@ -243,6 +243,42 @@ def _gex_time_to_expiry(expiry_str: str, now_et: Optional[datetime] = None) -> f
     return mins_left / (365.0 * 24.0 * 60.0)
 
 
+# Full RTH session (09:30–16:00 ET) in minutes, and a floor on the remaining
+# fraction so a 0DTE expected move never collapses to exactly zero into the bell.
+_RTH_MINUTES = 390.0
+SESSION_FRAC_FLOOR = 0.05
+
+
+def _session_fraction_remaining(now_et: Optional[datetime] = None) -> float:
+    """
+    Fraction of TODAY's regular session (09:30–16:00 ET) still ahead, in (0, 1].
+
+    1.0 before/at the open (the whole session is ahead — the right horizon for a
+    pre-open or at-open expected move), shrinking toward the close and floored at
+    SESSION_FRAC_FLOOR. Intraday volatility is concentrated in the 6.5h cash
+    session, so scaling the daily expected move by sqrt(this fraction) is the
+    honest "move over the rest of the session": at the open it recovers the full
+    daily move, by mid-afternoon it is a fraction of it. Used only for 0DTE,
+    where the chain expires at today's close — multi-day expiries are dominated
+    by the days ahead and keep the whole-day convention.
+    """
+    try:
+        from options_fetcher import _now_et
+        now = now_et or _now_et()
+        if getattr(now, 'tzinfo', None) is not None:
+            now = now.replace(tzinfo=None)
+    except Exception:
+        now = now_et or datetime.now()
+    open_dt = datetime.combine(now.date(), dtime_cls(9, 30))
+    close_dt = datetime.combine(now.date(), dtime_cls(16, 0))
+    if now <= open_dt:
+        return 1.0
+    if now >= close_dt:
+        return SESSION_FRAC_FLOOR
+    remaining = (close_dt - now).total_seconds() / 60.0
+    return max(remaining / _RTH_MINUTES, SESSION_FRAC_FLOOR)
+
+
 def compute_gex_profile(
     calls: pd.DataFrame,
     puts: pd.DataFrame,
@@ -456,6 +492,7 @@ def compute_iv_expected_move(
     spot: float,
     expiry_str: str,
     vix_fallback: float = None,
+    now_et: Optional[datetime] = None,
 ) -> dict:
     """
     IV-based expected price range using ATM straddle implied volatility.
@@ -464,14 +501,19 @@ def compute_iv_expected_move(
     2-sigma range (~95%): spot +/- 2 * (spot * IV * sqrt(T))
 
     Falls back to VIX/100 as IV proxy when option IVs are unavailable.
+
+    Horizon is intraday-honest on a 0DTE chain: it expires at today's close, so
+    its expected move shrinks with the fraction of the cash session still ahead
+    (full daily move at/just before the open, a fraction of it by mid-afternoon)
+    instead of pretending a whole trading day always remains. Multi-day expiries
+    are dominated by the days ahead and keep the whole-calendar-day convention.
     """
     today = date.today()
     try:
         expiry_date = datetime.strptime(expiry_str, '%Y-%m-%d').date()
     except (ValueError, TypeError):
         expiry_date = today
-    dte = max((expiry_date - today).days, 1)
-    T = dte / 365.0
+    cal_days = (expiry_date - today).days   # 0 on a same-day (0DTE) chain
 
     # Find ATM options (closest strike to spot)
     atm_call = calls.iloc[(calls['strike'] - spot).abs().argsort()[:3]]
@@ -496,17 +538,29 @@ def compute_iv_expected_move(
         atm_iv = 0.20
         iv_source = 'default'
 
+    # Horizon. A 0DTE chain expires at today's close, so both its to-expiry move
+    # and its "daily" (session) move scale with the fraction of the cash session
+    # still ahead — full daily move at/before the open, shrinking into the bell.
+    # Pre-open this is 1.0, so the recorder's pre-open move is unchanged.
+    full_daily_move = spot * atm_iv * math.sqrt(1.0 / 365.0)
+    if cal_days <= 0:
+        session_frac = _session_fraction_remaining(now_et)
+        T = session_frac / 365.0                 # to-expiry == rest of session
+        daily_move = full_daily_move * math.sqrt(session_frac)
+    else:
+        session_frac = 1.0
+        T = cal_days / 365.0
+        daily_move = full_daily_move             # multi-day: standard daily move
+
     # Expected move to expiry
     move_1s = spot * atm_iv * math.sqrt(T)
     move_2s = 2 * move_1s
 
-    # Daily expected move
-    daily_move = spot * atm_iv * math.sqrt(1 / 365.0)
-
     return {
         'iv_used': round(atm_iv, 4),
         'iv_source': iv_source,
-        'days_to_expiry': dte,
+        'days_to_expiry': cal_days,
+        'session_fraction_remaining': round(session_frac, 3),
         'expected_move_1sigma': round(move_1s, 2),
         'expected_move_2sigma': round(move_2s, 2),
         'range_low_1sigma': round(spot - move_1s, 2),
@@ -749,18 +803,21 @@ def nearest_reaction_levels(spot, gex_df=None, walls=None, neurals=None,
     return out
 
 
-def _snap_level(spot, raw_edge, final_move, candidates, side):
+def _snap_level(spot, raw_edge, final_move, candidates, side,
+                min_sigma=None, max_sigma=None):
     """
     Pick the strongest confluent level inside the snap window and blend the
     raw 1-sigma band edge toward it.
 
-    Window: LEVEL_SNAP_MIN_SIGMA..LEVEL_SNAP_MAX_SIGMA final-moves from spot —
-    a "floor" sitting on top of spot is noise, and one beyond the ~2-sigma
-    buyer/seller objectives is a worse estimate than the calibrated band.
-    Candidates within
-    LEVEL_SNAP_TOLERANCE_PCT of each other cluster into one level; clusters
-    rank by how many *independent* sources back them (the Fractal-Exchange
-    confluence idea), then member count, then proximity to the band edge.
+    Window: min_sigma..max_sigma final-moves from spot (defaults
+    LEVEL_SNAP_MIN_SIGMA..LEVEL_SNAP_MAX_SIGMA) — a "floor" sitting on top of
+    spot is noise, and one beyond the window is a worse estimate than the
+    calibrated band. The floor/ceiling snap keeps the default window; the
+    buyer/seller objectives widen it so they can reach real walls beyond 2σ.
+    Candidates within LEVEL_SNAP_TOLERANCE_PCT of each other cluster into one
+    level; clusters rank by how many *independent* sources back them (the
+    Fractal-Exchange confluence idea), then member count, then proximity to the
+    band edge.
 
     Returns None (keep the band edge) or
     {'level', 'snapped', 'blend', 'sources', 'n_members'}.
@@ -768,9 +825,11 @@ def _snap_level(spot, raw_edge, final_move, candidates, side):
     if final_move <= 0 or not candidates:
         return None
 
+    lo_sig = LEVEL_SNAP_MIN_SIGMA if min_sigma is None else min_sigma
+    hi_sig = LEVEL_SNAP_MAX_SIGMA if max_sigma is None else max_sigma
     below = side == 'floor'
-    near = spot - LEVEL_SNAP_MIN_SIGMA * final_move if below else spot + LEVEL_SNAP_MIN_SIGMA * final_move
-    far = spot - LEVEL_SNAP_MAX_SIGMA * final_move if below else spot + LEVEL_SNAP_MAX_SIGMA * final_move
+    near = spot - lo_sig * final_move if below else spot + lo_sig * final_move
+    far = spot - hi_sig * final_move if below else spot + hi_sig * final_move
     lo, hi = (far, near) if below else (near, far)
     in_window = [(p, s) for p, s in candidates if lo <= p <= hi]
     if not in_window:
@@ -916,9 +975,32 @@ def _compute_floor_ceiling(
                                   vectors=vectors),
         'ceiling')
 
+    # Objectives: the laddered targets BEYOND the box — real overhead supply
+    # (call wall / call-GEX cluster) above, real support (put wall / put-GEX
+    # cluster) below. Snap the 2σ band edge toward the strongest confluent level
+    # out to ~3σ so an objective sits on an actual defended strike (Milk's
+    # seller/buyer objective), not a symmetric statistical band edge. Falls back
+    # to the 2σ edge when no wall is in range. `ranges` stays pure band math so
+    # range_calibration still grades the true sigma envelope.
+    obj = ranges['2sigma']
+    buyer_basis = _snap_level(
+        anchor, obj['floor'], final_move,
+        _collect_level_candidates(anchor, 'floor', gex_df=gex_df, walls=walls,
+                                  neurals=neurals, fractal_levels=fractal_levels,
+                                  vectors=vectors),
+        'floor', min_sigma=1.5, max_sigma=3.0)
+    seller_basis = _snap_level(
+        anchor, obj['ceiling'], final_move,
+        _collect_level_candidates(anchor, 'ceiling', gex_df=gex_df, walls=walls,
+                                  neurals=neurals, fractal_levels=fractal_levels,
+                                  vectors=vectors),
+        'ceiling', min_sigma=1.5, max_sigma=3.0)
+
     return {
         'floor': floor_basis['snapped'] if floor_basis else primary['floor'],
         'ceiling': ceiling_basis['snapped'] if ceiling_basis else primary['ceiling'],
+        'buyer_objective': buyer_basis['snapped'] if buyer_basis else obj['floor'],
+        'seller_objective': seller_basis['snapped'] if seller_basis else obj['ceiling'],
         'ranges': ranges,
         'methodology': {
             'base_move': round(base_move, 2),
@@ -933,6 +1015,8 @@ def _compute_floor_ceiling(
             'dealer_ceiling': round(dealer_ceil, 2),
             'floor_basis': floor_basis,
             'ceiling_basis': ceiling_basis,
+            'buyer_objective_basis': buyer_basis,
+            'seller_objective_basis': seller_basis,
         },
     }
 
@@ -1016,10 +1100,15 @@ def compute_dealer_pin_close(
             anchor_source = 'session_open'
     except (TypeError, ValueError):
         pass
-    base_pull = 0.45
+    # Fraction of the spot→pin gap dealers close by expiry. Base is a touch over
+    # half (on an expiry day pinning closes most of a *neutral*-gamma gap); a
+    # long-gamma (sticky) regime pulls harder, a short-gamma (slippery) regime
+    # barely pins. The old 0.45 base made the estimate hug spot even when the pin
+    # was a clear, gamma-confirmed level a couple points away.
+    base_pull = 0.55
     gamma_adj = 0.40 * (gamma_strength - 0.5) * 2.0  # -0.40 .. +0.40
     regime_adj = {'choppy': 0.15, 'transitional': 0.0, 'trending': -0.20}.get(regime, 0.0)
-    pull = max(0.0, min(0.85, base_pull + gamma_adj + regime_adj))
+    pull = max(0.0, min(0.90, base_pull + gamma_adj + regime_adj))
     estimate = anchor + pull * (pin_target - anchor)
 
     # 4. Bracket by nearby fractal structure + the expected-move envelope.
@@ -1351,11 +1440,15 @@ def compute_composite_analysis(
     # 7. Bias via weighted vote (separate from range)
     bias, confidence = _compute_bias(signals)
 
-    # Scale floor/ceiling for futures proxy
+    # Scale floor/ceiling (and the snapped buyer/seller objectives) for futures proxy
     display_spot = meta.get('futures_spot', spot)
+    buyer_obj = fc_result.get('buyer_objective')
+    seller_obj = fc_result.get('seller_objective')
     if proxy_used and price_ratio > 1:
         display_floor = floor * price_ratio
         display_ceiling = ceiling * price_ratio
+        buyer_obj = buyer_obj * price_ratio if buyer_obj is not None else None
+        seller_obj = seller_obj * price_ratio if seller_obj is not None else None
     else:
         display_floor = floor
         display_ceiling = ceiling
@@ -1444,6 +1537,10 @@ def compute_composite_analysis(
         'expiry_substituted': bool(meta.get('expiry_substituted', False)),
         'floor': round(display_floor, 2),
         'ceiling': round(display_ceiling, 2),
+        # Laddered objectives beyond the box, snapped to real walls/GEX clusters
+        # (Milk's seller/buyer objective). Fall back to the 2σ band edge.
+        'seller_objective': round(seller_obj, 2) if seller_obj is not None else None,
+        'buyer_objective': round(buyer_obj, 2) if buyer_obj is not None else None,
         'bias': bias,
         'confidence': round(confidence, 1),
         # Where dealers are incentivized to pin price into expiry (item 4).
