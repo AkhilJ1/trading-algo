@@ -48,10 +48,21 @@ import numpy as np
 import pandas as pd
 
 # Forward windows scored for every candidate. 5d matches the classic
-# mean-reversion holding period; 10d is the outer edge of the user's tolerance.
-# Both are reported: when they disagree, that disagreement is itself a signal
-# about how fragile the setup is.
-HORIZONS = (5, 10)
+# mean-reversion holding period and 10d the outer edge of the intended holding
+# period; 15/30/120 are longer-run context.
+#
+# The long windows are deliberately NOT part of the validation decision. Two
+# reasons: independent (non-overlapping) events get scarce fast — a 120-day
+# window over 15 years admits at most ~31 — and at that range the forward
+# return is dominated by the ticker's own drift rather than by whatever the
+# setup was. They answer "what did this name do over the following months",
+# which is useful background, not "did this setup work".
+HORIZONS = (5, 10, 15, 30, 120)
+
+# Only these decide `confident`. Requiring all five to clear significance would
+# be a bar nothing could pass, which communicates nothing (the same calibration
+# mistake as the original hit-rate gate).
+VALIDATION_HORIZONS = (5, 10)
 
 # A setup needs at least this many independent historical analogs before any
 # rate computed from it is worth showing. Below this the page says
@@ -204,8 +215,9 @@ def apply_multiple_testing_correction(ideas: list, alpha: float = ALPHA_ONE_SIDE
         return ideas
 
     for idea in scored:
-        ps = [s["p_value"] for s in idea["stats"].values()
-              if s.get("p_value") is not None and np.isfinite(s["p_value"])]
+        ps = [st["p_value"] for h, st in idea["stats"].items()
+              if h in VALIDATION_HORIZONS
+              and st.get("p_value") is not None and np.isfinite(st["p_value"])]
         idea["p_combined"] = max(ps) if ps else float("nan")
 
     testable = [i for i in scored if np.isfinite(i.get("p_combined", np.nan))]
@@ -444,6 +456,7 @@ def evaluate_ticker(
         return None
 
     primary = stats.get(HORIZONS[0]) or next(iter(stats.values()))
+    validation = [s for h, s in stats.items() if h in VALIDATION_HORIZONS]
     return {
         "ticker": ticker,
         "rsi": round(float(rsi.iloc[-1]), 1),
@@ -452,17 +465,22 @@ def evaluate_ticker(
         "stats": {h: s.as_dict() for h, s in stats.items()},
         "n_analogs": primary.n,
         "sufficient_history": primary.n >= MIN_ANALOGS,
-        # Only claim confidence when EVERY horizon clears its own baseline at
-        # the pessimistic end of its interval. A setup that works at 5d but not
-        # 10d is not something to be confident about.
-        "confident": all(s.confident for s in stats.values()) and primary.n >= MIN_ANALOGS,
-        "expectancy": round(float(np.mean([s.expectancy for s in stats.values()])), 4),
+        # Confidence rests on the trading horizons only, and every one of them
+        # must clear its baseline: a setup that works at 5d but not 10d is not
+        # something to be confident about. The long windows are context.
+        "confident": (
+            bool(validation)
+            and all(s.confident for s in validation)
+            and primary.n >= MIN_ANALOGS
+        ),
+        "expectancy": round(float(np.mean([s.expectancy for s in validation])), 4)
+            if validation else 0.0,
         # Ranking key: mean CONSERVATIVE expectancy across horizons — the floor
         # of a one-sided interval, not the point estimate. A thin sample sinks
         # under its own standard error, so 3-for-3 ranks below 17-of-25, which
         # is the whole point when the ask is "confident the return is positive".
         "score": (
-            float(np.mean([s.expectancy_ci_low for s in stats.values()]))
-            if primary.n >= MIN_ANALOGS else float("-inf")
+            float(np.mean([s.expectancy_ci_low for s in validation]))
+            if validation and primary.n >= MIN_ANALOGS else float("-inf")
         ),
     }
