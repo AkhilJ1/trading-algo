@@ -15,7 +15,7 @@ Compatible with streamlit 1.12.0 (Python 3.9.7 environment).
 import sys
 import os
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import streamlit as st
 import numpy as np
@@ -93,7 +93,6 @@ def _bridge_schwab_secrets() -> None:
 _bridge_schwab_secrets()
 
 from config import WATCHLIST, MA_SHORT, MA_LONG, RSI_OVERSOLD, BB_WICK_LOOKBACK, SIGNAL_WEIGHTS
-from screener import discover_candidates
 from data_fetcher import fetch_stock_data
 from scanner import scan_ticker
 from backtest import backtest_ma_crossover
@@ -531,47 +530,31 @@ def build_chart(df: pd.DataFrame, ticker: str, chart_type: str = 'Candlestick') 
 # ===========================================================================
 # Shared scanner helpers
 # ===========================================================================
-def _run_scan(tickers: list) -> dict:
-    """Scan a list of tickers with full signal detection; return {buy, sell, watch, opportunities, all, errors} dict."""
-    from scanner import scan_ticker_full
-    buy, sell, watch, all_results, errors = [], [], [], [], []
-    status = st.empty()
-    bar = st.progress(0)
-    for i, ticker in enumerate(tickers):
-        status.text(f'Scanning {ticker}… ({i+1}/{len(tickers)})')
-        bar.progress((i + 1) / len(tickers))
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_trade_ideas(tickers: tuple) -> list:
+    """
+    Batch-download the universe once and score every ticker against its own
+    history. Cached for 30 minutes because the analog search re-reads 5 years
+    per ticker, and nothing here changes intraday at a rate that matters.
+
+    Falls back to an empty list rather than raising: a scan failure should
+    leave the page empty and honest, never half-populated.
+    """
+    from providers import get_provider
+    from trade_ideas import scan_universe
+
+    symbols = list(dict.fromkeys(list(tickers) + ['SPY']))
+    frames = {}
+    for sym in symbols:
         try:
-            result = scan_ticker_full(ticker)
-            if result is None:
-                errors.append((ticker, 'Insufficient data'))
-            else:
-                all_results.append(result)
-                if result['buy_signal']:
-                    buy.append(result)
-                elif result.get('sell_signal'):
-                    sell.append(result)
-                elif result['rsi_oversold']:
-                    watch.append(result)
-        except Exception as e:
-            errors.append((ticker, str(e)))
-    status.empty()
-    bar.empty()
-    buy.sort(key=lambda x: x.get('composite_score', x['strength']), reverse=True)
-    sell.sort(key=lambda x: x.get('sell_strength', 0), reverse=True)
-    watch.sort(key=lambda x: x['rsi'])
-    all_results.sort(key=lambda x: x.get('composite_score', 0), reverse=True)
-
-    # Collect all opportunities across tickers
-    all_opps = []
-    for r in all_results:
-        for opp in r.get('opportunities', []):
-            opp['ticker'] = r['ticker']
-            opp['price'] = r['price']
-            all_opps.append(opp)
-    all_opps.sort(key=lambda x: (x['tier'], -x['confidence']))
-
-    return {'buy': buy, 'sell': sell, 'watch': watch, 'opportunities': all_opps,
-            'all': all_results, 'errors': errors}
+            df = fetch_stock_data(sym, period='5y', interval='1d')
+            if df is not None and not df.empty and 'Close' in df.columns:
+                frames[sym] = df['Close']
+        except Exception:
+            continue
+    if 'SPY' not in frames:
+        return []
+    return scan_universe(pd.DataFrame(frames))
 
 
 def _tier_badge(tier: int) -> str:
@@ -582,235 +565,6 @@ def _tier_badge(tier: int) -> str:
         return '<span style="background:#e65100;color:#ffcc80;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;">VALIDATED</span>'
     else:
         return '<span style="background:#424242;color:#bdbdbd;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;">SPECULATIVE</span>'
-
-
-def _render_scan_results(results: dict, total: int) -> None:
-    """Render buy signals, sell signals, opportunities, consensus, watch list, and errors."""
-    buy_signals   = results['buy']
-    sell_signals  = results.get('sell', [])
-    watch_only    = results['watch']
-    opportunities = results.get('opportunities', [])
-    all_results   = results.get('all', [])
-    errors        = results['errors']
-
-    # ── Summary metrics ───────────────────────────────────────────────
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric('Scanned', total)
-    c2.metric('Buy Signals', len(buy_signals))
-    c3.metric('Sell Signals', len(sell_signals))
-    c4.metric('Opportunities', len(opportunities))
-    c5.metric('Watching', len(watch_only))
-    c6.metric('Errors', len(errors))
-    st.markdown('---')
-
-    # ── BUY SIGNALS ───────────────────────────────────────────────────
-    if buy_signals:
-        st.subheader('Buy Signals')
-        for sig in buy_signals:
-            xo = sig['ma_last_crossover']
-            xo_str = ''
-            if xo:
-                d = xo['date'].strftime('%Y-%m-%d') if hasattr(xo['date'], 'strftime') else str(xo['date'])[:10]
-                xo_str = f"Last {xo['type'].replace('_', ' ')} on {d} @ ${xo['price']:.2f}"
-            wick_dates = ', '.join(sig['wick_dates'][-3:]) if sig['wick_dates'] else 'none'
-            factors = sig.get('factors')
-            composite = sig.get('composite_score', sig['strength'])
-            with st.expander(
-                f"**{sig['ticker']}**  —  ${sig['price']:.2f}  |  Score {composite:.0f}/100",
-                expanded=True,
-            ):
-                st.markdown(_tier_badge(1) + '&nbsp; RSI + Bollinger Band buy signal', unsafe_allow_html=True)
-                r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-                r1c1.metric('Price', f"${sig['price']:.2f}")
-                r1c2.metric('RSI', f"{sig['rsi']:.1f}")
-                r1c3.metric('Strength', f"{sig['strength']:.0f}/100")
-                r1c4.metric('Composite', f"{composite:.0f}/100")
-                if factors:
-                    def _dot(val, label):
-                        color = '#26a69a' if val > 0 else '#666'
-                        return f'<span style="color:{color};font-weight:bold;">{label}</span>'
-                    dots = ' · '.join([
-                        _dot(factors['rsi_score'], f"RSI {factors['rsi_score']:.0f}"),
-                        _dot(factors['zscore_score'], f"Z {factors['zscore_score']:.0f}"),
-                        _dot(factors['volume_score'], f"Vol {factors['volume_score']:.0f}"),
-                        _dot(factors['regime_score'], f"Rgm {factors['regime_score']:.0f}"),
-                        _dot(factors['atr_score'], f"ATR {factors['atr_score']:.0f}"),
-                    ])
-                    st.markdown(dots, unsafe_allow_html=True)
-                    st.caption(f"Z-Score: {factors['zscore']:.2f}  |  Regime: {factors['regime'].title()}  |  ATR: {factors['atr_state']}")
-                st.markdown(
-                    f"**MA Trend:** {sig['ma_trend'].upper()}  |  "
-                    f"**Wick touches:** {sig['wick_touches']} → {wick_dates}"
-                )
-                if xo_str:
-                    st.caption(xo_str)
-                # Strategy consensus inline
-                cons = sig.get('consensus')
-                if cons:
-                    _render_consensus_inline(cons)
-
-    # ── SELL SIGNALS ──────────────────────────────────────────────────
-    if sell_signals:
-        st.subheader('Sell Signals')
-        for sig in sell_signals:
-            sell_str = sig.get('sell_strength', 0)
-            comps = sig.get('sell_components', {})
-            with st.expander(
-                f"**{sig['ticker']}**  —  ${sig['price']:.2f}  |  Sell Strength {sell_str:.0f}/100",
-                expanded=True,
-            ):
-                # Determine tier based on active count
-                tier = 1 if sig.get('sell_active_count', 0) >= 3 else 2
-                st.markdown(_tier_badge(tier) + '&nbsp; Overbought / sell signal', unsafe_allow_html=True)
-                sc1, sc2, sc3, sc4 = st.columns(4)
-                sc1.metric('Price', f"${sig['price']:.2f}")
-                sc2.metric('RSI', f"{sig['rsi']:.1f}")
-                sc3.metric('Sell Strength', f"{sell_str:.0f}/100")
-                sc4.metric('Conditions Met', f"{sig.get('sell_active_count', 0)}/4")
-                # Component breakdown
-                comp_parts = []
-                if comps.get('rsi_overbought'):
-                    comp_parts.append('RSI > 70')
-                if comps.get('zscore_extended'):
-                    comp_parts.append('Z-Score > +2.0')
-                if comps.get('above_keltner'):
-                    comp_parts.append('Above Keltner Upper')
-                if comps.get('above_bb_upper'):
-                    comp_parts.append('Above BB Upper')
-                if comp_parts:
-                    st.markdown('**Active conditions:** ' + ' · '.join(comp_parts))
-                st.caption(f"MA Trend: {sig['ma_trend'].upper()}")
-                cons = sig.get('consensus')
-                if cons:
-                    _render_consensus_inline(cons)
-
-    # ── OPPORTUNITIES ─────────────────────────────────────────────────
-    if opportunities:
-        st.subheader('Opportunities')
-        st.caption('Actionable setups detected across your watchlist — grouped by confidence tier')
-
-        # Detect conflicting signals per ticker
-        _opp_dirs = {}
-        for opp in opportunities:
-            _opp_dirs.setdefault(opp['ticker'], set()).add(opp['direction'])
-        conflicted_tickers = {t for t, dirs in _opp_dirs.items() if len(dirs) > 1}
-
-        if conflicted_tickers:
-            tickers_str = ', '.join(sorted(conflicted_tickers))
-            st.warning(
-                f"**Conflicting signals for {tickers_str}** — "
-                "different timeframes disagree. A short-term mean reversion (bounce) "
-                "can coexist with a longer-term downtrend. Higher-tier signals carry more weight; "
-                "consider your holding period when choosing which to act on."
-            )
-
-        # Group by tier
-        tier_groups = {1: [], 2: [], 3: []}
-        for opp in opportunities:
-            tier_groups[opp['tier']].append(opp)
-
-        for tier_num, tier_label in [(1, 'Proven (Statistical Basis)'), (2, 'Validated (Backtested)'), (3, 'Speculative')]:
-            items = tier_groups[tier_num]
-            if not items:
-                continue
-            st.markdown(f"#### {tier_label}")
-            for opp in items:
-                dir_icon = '↑' if opp['direction'] == 'long' else '↓'
-                dir_color = '#26a69a' if opp['direction'] == 'long' else '#ef5350'
-                # Conflict indicator
-                conflict_tag = ''
-                if opp['ticker'] in conflicted_tickers:
-                    conflict_tag = '&nbsp;&nbsp;<span style="color:#ffd600;font-size:11px;" title="This ticker has opposing signals at different timeframes">CONFLICTED</span>'
-                html = (
-                    f'<div style="background:#1a1f2e;padding:10px 14px;border-radius:6px;'
-                    f'border-left:3px solid {dir_color};margin:4px 0;">'
-                    f'<div style="display:flex;justify-content:space-between;align-items:center;">'
-                    f'<div>'
-                    f'<span style="font-weight:bold;font-size:14px;color:#fafafa;">{opp["ticker"]}</span>'
-                    f'&nbsp;&nbsp;{_tier_badge(tier_num)}'
-                    f'&nbsp;&nbsp;<span style="color:{dir_color};font-weight:bold;">{dir_icon} {opp["direction"].upper()}</span>'
-                    f'&nbsp;&nbsp;<span style="color:#90caf9;font-size:13px;">{opp["setup"]}</span>'
-                    f'{conflict_tag}'
-                    f'</div>'
-                    f'<div style="color:#fff;font-weight:bold;font-size:13px;">'
-                    f'${opp["price"]:.2f} &nbsp;|&nbsp; Confidence: {opp["confidence"]}%</div>'
-                    f'</div>'
-                    f'<div style="color:#aaa;font-size:12px;margin-top:4px;">{opp["reason"]}</div>'
-                    f'</div>'
-                )
-                st.markdown(html, unsafe_allow_html=True)
-    elif not buy_signals and not sell_signals:
-        st.info('No actionable signals or opportunities detected. All tickers are in neutral territory.')
-
-    # ── STRATEGY CONSENSUS ────────────────────────────────────────────
-    consensus_tickers = [r for r in all_results if r.get('consensus')]
-    if consensus_tickers:
-        with st.expander('Strategy Consensus (all tickers)', expanded=False):
-            st.caption('Latest signal from each strategy: +1 bullish, -1 bearish, 0 neutral')
-            cons_rows = []
-            for r in consensus_tickers:
-                cons = r['consensus']
-                row = {'Ticker': r['ticker']}
-                for strat, val in cons['signals'].items():
-                    row[strat] = val
-                row['Bullish'] = cons['bullish_count']
-                row['Bearish'] = cons['bearish_count']
-                row['Consensus'] = cons['consensus'].title()
-                cons_rows.append(row)
-            if cons_rows:
-                df_cons = pd.DataFrame(cons_rows)
-                st.dataframe(df_cons, width='stretch')
-
-    # ── WATCH LIST ────────────────────────────────────────────────────
-    if watch_only:
-        st.subheader('Watch — RSI Oversold, Awaiting BB Wick Touch')
-        watch_data = []
-        for s in watch_only:
-            row = {
-                'Ticker': s['ticker'],
-                'Price': f"${s['price']:.2f}",
-                'RSI': round(s['rsi'], 1),
-                'BB Lower': f"${s['bb_lower']:.2f}",
-                'BB Upper': f"${s['bb_upper']:.2f}",
-                'MA Trend': s['ma_trend'].upper(),
-            }
-            if s.get('factors'):
-                row['Regime'] = s['factors']['regime'].title()
-                row['Z-Score'] = s['factors']['zscore']
-                row['Score'] = s.get('composite_score', 0)
-            watch_data.append(row)
-        st.dataframe(pd.DataFrame(watch_data), width='stretch')
-
-    # ── FACTOR BREAKDOWN ──────────────────────────────────────────────
-    if all_results:
-        with st.expander('Factor Breakdown (all scanned tickers)'):
-            factor_rows = []
-            for r in all_results:
-                f = r.get('factors')
-                row = {
-                    'Ticker': r['ticker'],
-                    'Price': f"${r['price']:.2f}",
-                    'RSI': round(r['rsi'], 1),
-                    'Signal': 'BUY' if r['buy_signal'] else ('SELL' if r.get('sell_signal') else ('WATCH' if r['rsi_oversold'] else '—')),
-                }
-                if f:
-                    row.update({
-                        'RSI Score': f['rsi_score'],
-                        'Z-Score': f['zscore'],
-                        'Z Score': f['zscore_score'],
-                        'Vol Score': f['volume_score'],
-                        'Regime': f['regime'].title(),
-                        'Regime Score': f['regime_score'],
-                        'ATR Score': f['atr_score'],
-                        'Composite': r.get('composite_score', 0),
-                    })
-                factor_rows.append(row)
-            st.dataframe(pd.DataFrame(factor_rows), width='stretch')
-
-    if errors:
-        with st.expander(f'Errors ({len(errors)})'):
-            for ticker, err in errors:
-                st.warning(f'**{ticker}**: {err}')
 
 
 def _render_consensus_inline(cons: dict) -> None:
@@ -835,134 +589,132 @@ def _render_consensus_inline(cons: dict) -> None:
     )
 
 
-def _candidate_card_html(r: dict) -> str:
-    """Return an HTML card for a dynamic screener candidate."""
-    ticker = r['ticker']
-    if r['buy_signal']:
-        border = '#26a69a'
-        badge  = f'<span style="color:#26a69a;font-weight:bold;">● BUY &nbsp;{r["strength"]:.0f}/100</span>'
-    elif r['rsi_oversold']:
-        border = '#ffd600'
-        badge  = '<span style="color:#ffd600;font-weight:bold;">● WATCH</span>'
-    else:
-        border = '#4a90d9'
-        badge  = '<span style="color:#4a90d9;font-weight:bold;">● Near oversold</span>'
-
-    return (
-        f'<div style="background:#1a1f2e;padding:12px;border-radius:8px;'
-        f'border-left:3px solid {border};margin:3px 0;">'
-        f'<div style="font-size:15px;font-weight:bold;color:#fafafa;">{ticker}</div>'
-        f'<div style="margin-top:5px;">{badge}</div>'
-        f'<div style="margin-top:6px;color:#ccc;font-size:13px;">'
-        f'<strong>${r["price"]:.2f}</strong> &nbsp;|&nbsp; RSI {r["rsi"]:.1f} &nbsp;|&nbsp; Wicks {r["wick_touches"]}</div>'
-        f'<div style="margin-top:3px;color:#888;font-size:11px;">'
-        f'Score {r["score"]:.0f} &nbsp;·&nbsp; Win rate {r["win_rate"]:.0f}% ({r["num_trades"]} trades)</div>'
-        f'</div>'
-    )
-
-
 # ===========================================================================
 # PAGE 1: Daily Scanner
 # ===========================================================================
 if page == '📡 Daily Scanner':
     st.markdown("<h1 style='color: #ffffff;'>📡 Daily Scanner</h1>", unsafe_allow_html=True)
-    st.caption('Multi-factor scanner: buy signals, sell signals, and opportunities across your watchlist')
+    st.caption('Tickers behaving unusually for themselves — with what historically followed')
 
-    # ── Session state ──────────────────────────────────────────────────────
-    if 'dynamic_results' not in st.session_state:
-        st.session_state.dynamic_results = None
-        st.session_state.dynamic_time = None
-    if 'scan_results' not in st.session_state:
-        st.session_state.scan_results = None
-        st.session_state.scan_time = None
-        st.session_state.scan_total = 0
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION 1 — Dynamic Candidates (S&P 500 weekly screen)
-    # ══════════════════════════════════════════════════════════════════════
-    dyn_hdr, dyn_time_col, dyn_btn_col = st.columns([3, 2, 1])
-    with dyn_hdr:
-        st.subheader('🎯 Dynamic Candidates')
-        st.caption('Scans S&P 500 weekly charts · ranked by signal strength + backtest win rate')
-    with dyn_time_col:
-        if st.session_state.dynamic_time:
-            st.write('')
-            st.caption(f'Last run: {st.session_state.dynamic_time}')
-    with dyn_btn_col:
-        st.write('')
-        st.write('')
-        discover_btn = st.button('Discover')
-
-    if discover_btn:
-        prog_bar = st.progress(0.0)
-        prog_text = st.empty()
-
-        def _dyn_progress(pct, msg):
-            prog_bar.progress(min(pct, 1.0))
-            prog_text.text(msg)
-
-        results = discover_candidates(progress_callback=_dyn_progress, top_n=15)
-        prog_bar.empty()
-        prog_text.empty()
-
-        st.session_state.dynamic_results = results
-        from datetime import datetime
-        st.session_state.dynamic_time = datetime.now().strftime('%H:%M:%S')
-
-    if st.session_state.dynamic_results is not None:
-        candidates = st.session_state.dynamic_results
-        if not candidates:
-            st.info('No candidates met the weekly RSI threshold right now. Markets may not be oversold.')
-        else:
-            st.caption(f'{len(candidates)} candidates found — weekly chart analysis + backtest ranked')
-            CARDS_PER_ROW = 5
-            for row_start in range(0, len(candidates), CARDS_PER_ROW):
-                chunk = candidates[row_start:row_start + CARDS_PER_ROW]
-                cols = st.columns(CARDS_PER_ROW)
-                for j, r in enumerate(chunk):
-                    cols[j].markdown(_candidate_card_html(r), unsafe_allow_html=True)
-    else:
-        st.info('Click **Discover** to scan S&P 500 weekly charts and surface the highest-conviction setups. Takes ~1–2 minutes.')
-
-    st.markdown('---')
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION 2 — Daily Watchlist Scanner (auto-runs on page load)
-    # ══════════════════════════════════════════════════════════════════════
-    scan_hdr, scan_time_col, rescan_col = st.columns([3, 2, 1])
-    with scan_hdr:
-        st.subheader('🔍 Daily Watchlist Scan')
-    with scan_time_col:
-        if st.session_state.scan_time:
-            st.write('')
-            st.caption(f'Last scanned: {st.session_state.scan_time}')
-    with rescan_col:
-        st.write('')
-        rescan_btn = st.button('Re-scan')
-
-    custom_input = st.text_input(
-        'Override tickers (comma-separated) — leave blank to scan full watchlist',
-        placeholder='e.g. AAPL, NVDA, TSLA',
+    # This page deliberately does NOT rank by expected return or advertise
+    # "high conviction" setups. RSI extremes, and RSI+MACD confluence, were
+    # tested on this universe out-of-sample with date-clustered standard errors
+    # and produced p = 0.49-0.79 — no measurable edge. Ranking on predicted
+    # profit would therefore be sorting noise and labelling it a forecast.
+    # What the data DOES support is "this ticker is behaving atypically for
+    # itself", so that is the claim the page makes, with the full historical
+    # distribution attached so the human can judge.
+    st.info(
+        '**What this page is.** It surfaces tickers whose RSI/MACD are unusual '
+        '*relative to their own history*, and shows what actually happened the '
+        'last time they looked like this — wins and losses.\n\n'
+        '**What it is not.** It is not a list of predicted winners. These '
+        'signals were tested out-of-sample with date-clustered errors and showed '
+        'no significant edge (p ≈ 0.5–0.8). Treat the base rates as context for '
+        'your own judgement, not as a forecast.'
     )
 
-    # Auto-run on first page load; re-run on button click
-    needs_scan = (st.session_state.scan_results is None) or rescan_btn
-    if needs_scan:
-        tickers = (
-            [t.strip().upper() for t in custom_input.split(',') if t.strip()]
-            if custom_input.strip() else WATCHLIST
-        )
-        results = _run_scan(tickers)
-        st.session_state.scan_results = results
-        st.session_state.scan_total = len(tickers)
-        from datetime import datetime
-        st.session_state.scan_time = datetime.now().strftime('%H:%M:%S')
+    if 'ideas' not in st.session_state:
+        st.session_state.ideas = None
+        st.session_state.ideas_time = None
 
-    if st.session_state.scan_results:
-        _render_scan_results(
-            st.session_state.scan_results,
-            st.session_state.scan_total,
-        )
+    ctl_l, ctl_m, ctl_r = st.columns([3, 2, 1])
+    with ctl_l:
+        horizon = st.radio('Forward window', [5, 10], horizontal=True,
+                           format_func=lambda h: f'{h} trading days')
+    with ctl_m:
+        if st.session_state.ideas_time:
+            st.write('')
+            st.caption(f'Last scanned: {st.session_state.ideas_time}')
+    with ctl_r:
+        st.write('')
+        rescan = st.button('Re-scan')
+
+    only_extreme = st.checkbox(
+        'Only show tickers in the top/bottom 20th percentile of their own range',
+        value=True,
+    )
+
+    if st.session_state.ideas is None or rescan:
+        with st.spinner('Scanning watchlist and searching each ticker\'s history…'):
+            st.session_state.ideas = _load_trade_ideas(tuple(WATCHLIST))
+            st.session_state.ideas_time = datetime.now().strftime('%H:%M:%S')
+
+    ideas = st.session_state.ideas or []
+    if only_extreme:
+        ideas = [i for i in ideas if i['rsi_percentile'] <= 20 or i['rsi_percentile'] >= 80]
+
+    n_validated = sum(1 for i in (st.session_state.ideas or []) if i.get('confident'))
+    m_tested = (st.session_state.ideas or [{}])[0].get('n_tested', 0)
+
+    head_a, head_b = st.columns([3, 2])
+    with head_a:
+        st.subheader(f'{len(ideas)} ticker(s) behaving unusually')
+    with head_b:
+        if n_validated:
+            st.success(f'{n_validated} cleared statistical validation')
+        else:
+            st.caption(
+                f'0 of {m_tested} cleared statistical validation — '
+                'expected, given no edge was detectable in testing.'
+            )
+
+    if not ideas:
+        st.info('Nothing in the watchlist is at a notable extreme right now. '
+                'Uncheck the filter above to see the full ranking.')
+
+    for idea in ideas:
+        s = idea['stats'].get(horizon)
+        if not s:
+            continue
+        badge = '✅ VALIDATED' if idea.get('confident') else 'not validated'
+        arrow = '🔻' if idea['direction'] == 'oversold' else '🔺'
+        conf = ' · RSI+MACD aligned' if idea.get('confluence') else ''
+
+        with st.expander(
+            f"{arrow}  {idea['ticker']}  —  ${idea['last_close']}  ·  "
+            f"RSI {idea['rsi']} ({idea['rsi_percentile']:.0f}th pct){conf}  ·  {badge}"
+        ):
+            st.markdown(
+                f"**Why it surfaced.** {idea['ticker']}'s RSI is at the "
+                f"**{idea['rsi_percentile']:.0f}th percentile** of its own trailing year"
+                + (f", and its MACD histogram at the **{idea['macd_percentile']:.0f}th**"
+                   if idea.get('macd_percentile') is not None else '')
+                + f". That is {idea['direction']} *for this ticker* — which is a different "
+                  'bar than a fixed RSI threshold applied to every name.'
+            )
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric('Analogs found', s['n'])
+            c2.metric(f'Avg {horizon}d vs SPY', f"{s['expectancy']:+.2%}")
+            c3.metric('Went up', f"{s['hit_rate']:.0%}",
+                      delta=f"{s['lift']:+.0%} vs its own baseline")
+            c4.metric('One-sided p', f"{s['p_value']:.3f}")
+
+            st.caption(
+                f"Range across those {s['n']} analogs: worst {s['worst']:+.2%}, "
+                f"median {s['median']:+.2%}, best {s['best']:+.2%}. "
+                f"Reached +5% raw in {s['target_hits']} of {s['n']} "
+                f"(vs {s['target_base_rate']:.0%} of all days for this ticker). "
+                'All returns are relative to SPY, so market drift is removed.'
+            )
+
+            if not idea.get('confident'):
+                st.warning(
+                    f"Not statistically validated. p = {s['p_value']:.3f} on its own, "
+                    f"and {m_tested} tickers were scanned — at a 5% threshold roughly "
+                    f"{max(1, round(m_tested * 0.05))} would look significant by chance alone. "
+                    'This is historical context, not evidence of an edge.'
+                )
+
+            if s['examples']:
+                st.markdown('**What actually happened — winners and losers**')
+                ex = pd.DataFrame(s['examples'])
+                ex['abnormal_return'] = ex['abnormal_return'].map(lambda v: f'{v:+.2%}')
+                ex['raw_return'] = ex['raw_return'].map(
+                    lambda v: f'{v:+.2%}' if v is not None else '—')
+                ex.columns = ['Date', f'{horizon}d vs SPY', f'{horizon}d raw']
+                st.dataframe(ex, hide_index=True, use_container_width=True)
 
 
 # ===========================================================================

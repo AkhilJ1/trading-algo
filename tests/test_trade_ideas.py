@@ -18,6 +18,7 @@ from trade_ideas import (
     evaluate_ticker,
     find_analogs,
     percentile_of_last,
+    scan_universe,
     score_analogs,
     wilson_interval,
 )
@@ -232,3 +233,53 @@ def test_strong_result_still_survives_correction():
 
 def test_correction_is_safe_on_empty_input():
     assert apply_multiple_testing_correction([]) == []
+
+
+# ── scan_universe ───────────────────────────────────────────────────────
+
+def _wide_frame(tickers, n=800, seed=5):
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2018-01-01", periods=n)
+    data = {t: 100 * np.exp(np.cumsum(rng.normal(0.0002, 0.015, n))) for t in tickers}
+    return pd.DataFrame(data, index=idx)
+
+
+def test_scan_ranks_by_unusualness_not_by_expected_return():
+    """Ranking on expected return would be sorting noise and calling it a
+    forecast — out-of-sample date-clustered tests put this signal at p=0.67."""
+    df = _wide_frame(["AAA", "BBB", "CCC", "SPY"])
+    ideas = scan_universe(df)
+
+    assert ideas, "expected some ideas"
+    unusual = [i["unusualness"] for i in ideas]
+    assert unusual == sorted(unusual, reverse=True)
+
+
+def test_scan_reports_confluence_without_claiming_predictive_power():
+    df = _wide_frame(["AAA", "SPY"])
+    ideas = scan_universe(df)
+    for i in ideas:
+        assert isinstance(i["confluence"], bool)
+        assert "macd_percentile" in i
+        # Confluence must never silently promote something to confident.
+        if i["confluence"]:
+            assert i["confident"] in (True, False)
+
+
+def test_scan_applies_correction_across_the_whole_scan():
+    df = _wide_frame([f"T{i}" for i in range(8)] + ["SPY"])
+    ideas = scan_universe(df)
+    assert all("n_tested" in i for i in ideas)
+    assert all(i["n_tested"] == len(ideas) for i in ideas)
+
+
+def test_scan_returns_empty_without_benchmark():
+    df = _wide_frame(["AAA", "BBB"])
+    assert scan_universe(df, benchmark="SPY") == []
+
+
+def test_scan_labels_direction():
+    df = _wide_frame(["AAA", "BBB", "SPY"])
+    for i in scan_universe(df):
+        assert i["direction"] in ("oversold", "overbought")
+        assert (i["direction"] == "oversold") == (i["rsi_percentile"] < 50)

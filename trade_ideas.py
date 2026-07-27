@@ -127,6 +127,63 @@ class AnalogStats:
         return d
 
 
+def macd_histogram(close: pd.Series, fast=12, slow=26, signal=9) -> pd.Series:
+    """MACD histogram normalised by price, so it is comparable across tickers."""
+    line = close.ewm(span=fast, adjust=False).mean() - close.ewm(span=slow, adjust=False).mean()
+    return (line - line.ewm(span=signal, adjust=False).mean()) / close
+
+
+def scan_universe(price_frame: pd.DataFrame, benchmark: str = "SPY",
+                  lookback: int = 252) -> list:
+    """
+    Evaluate every column of a wide close-price frame and rank by how UNUSUAL
+    each ticker currently is — not by predicted profit.
+
+    That ranking choice is the honest one. Out-of-sample, date-clustered testing
+    of RSI and RSI+MACD extremes on this universe produced p-values of 0.49-0.79:
+    no measurable edge. Ranking by "expected return" would therefore be sorting
+    noise and presenting it as a forecast. Ranking by unusualness makes a claim
+    the data does support — this ticker is behaving atypically for itself — and
+    leaves the forward-looking judgement to the human, with the historical
+    distribution shown alongside so that judgement is informed.
+    """
+    if benchmark not in price_frame.columns:
+        return []
+    bench = price_frame[benchmark].dropna()
+    out = []
+    for ticker in price_frame.columns:
+        if ticker == benchmark:
+            continue
+        close = price_frame[ticker].dropna()
+        if close.empty:
+            continue
+        idea = evaluate_ticker(pd.DataFrame({"Close": close}), bench,
+                               ticker=ticker, lookback=lookback)
+        if idea is None:
+            continue
+        macd_pct = percentile_of_last(macd_histogram(close), lookback)
+        idea["macd_percentile"] = round(macd_pct, 1) if macd_pct is not None else None
+        # Distance from the middle of the ticker's own distribution, in
+        # percentile points. 50 = most extreme reading possible either way.
+        rsi_extremity = abs(idea["rsi_percentile"] - 50.0)
+        macd_extremity = abs(macd_pct - 50.0) if macd_pct is not None else 0.0
+        idea["unusualness"] = round((rsi_extremity + macd_extremity) / 2.0, 1)
+        idea["direction"] = "oversold" if idea["rsi_percentile"] < 50 else "overbought"
+        # Both indicators at the same extreme. Reported because it is what the
+        # user asked to see — NOT because it was found predictive. Tested
+        # out-of-sample with date-clustered errors it was p=0.67.
+        idea["confluence"] = bool(
+            macd_pct is not None
+            and (idea["rsi_percentile"] < 20 and macd_pct < 20
+                 or idea["rsi_percentile"] > 80 and macd_pct > 80)
+        )
+        out.append(idea)
+
+    apply_multiple_testing_correction(out)
+    out.sort(key=lambda i: i["unusualness"], reverse=True)
+    return out
+
+
 def apply_multiple_testing_correction(ideas: list, alpha: float = ALPHA_ONE_SIDED) -> list:
     """
     Benjamini-Hochberg FDR correction across a whole scan.
