@@ -322,7 +322,13 @@ def build_triggers(df: pd.DataFrame, direction: str = "oversold") -> list:
             f"({_pct(last_piv, prev_piv)})"))
 
     # ── 7. Volume expansion ────────────────────────────────────────────────
-    if vol is not None and vol.notna().any():
+    # A column of zeros is MISSING data, not a run of very quiet days — Schwab
+    # reports 0 volume for index symbols ($VIX, $SPX) and yfinance does the
+    # same. Kept, the row would render "never showed up, 0% of the time",
+    # which reads as a fact about the ticker rather than an absent feed. Coerced
+    # to numeric first because a JSON-derived column can arrive as strings.
+    vol = pd.to_numeric(vol, errors="coerce") if vol is not None else None
+    if vol is not None and bool((vol.fillna(0) > 0).any()):
         avg = vol.rolling(BB_PERIOD).mean()
         moved = close > close.shift(1) if bull else close < close.shift(1)
         mask = _bool(moved, idx) & _bool(vol > VOLUME_SURGE * avg, idx)

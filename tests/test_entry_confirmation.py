@@ -171,6 +171,44 @@ def test_triggers_survive_frames_without_volume():
     assert "volume" not in keys
 
 
+def test_all_zero_volume_is_treated_as_missing_not_as_quiet_days():
+    """
+    Schwab returns 0 volume for index symbols ($VIX, $SPX), as does yfinance.
+    Kept, the row would say "showed up 0% of the time" — which reads as a fact
+    about the ticker rather than an absent feed.
+    """
+    df = _ohlcv()
+    df["Volume"] = 0
+    assert "volume" not in [t.key for t in build_triggers(df, "oversold")]
+
+
+def test_volume_arriving_as_strings_still_works():
+    """Provider frames are JSON-derived; a numeric-looking string column must
+    not silently disable the volume trigger."""
+    df = _ohlcv()
+    df["Volume"] = df["Volume"].astype(int).astype(str)
+    trig = [t for t in build_triggers(df, "oversold") if t.key == "volume"]
+    assert trig and trig[0].mask.any()
+
+
+def test_schwab_shaped_frame_yields_the_full_checklist():
+    """
+    The app runs Schwab-primary. Its provider returns Open/High/Low/Close/Volume
+    on a naive-Eastern DatetimeIndex named 'Date', with integer volume — a
+    different dtype and index name than the yfinance path.
+    """
+    df = _ohlcv()
+    schwab = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+    schwab["Volume"] = schwab["Volume"].astype("int64")
+    schwab.index = pd.DatetimeIndex(schwab.index, name="Date")
+
+    triggers = build_triggers(schwab, "oversold")
+    assert len(triggers) == 8, [t.key for t in triggers]
+    assert "volume" in [t.key for t in triggers]
+    for t in triggers:
+        assert t.mask.dtype == bool
+
+
 def test_triggers_need_enough_history():
     thin = pd.DataFrame({"Close": np.linspace(100, 110, 20)},
                         index=pd.bdate_range("2024-01-01", periods=20))
