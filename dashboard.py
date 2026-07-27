@@ -534,8 +534,10 @@ def build_chart(df: pd.DataFrame, ticker: str, chart_type: str = 'Candlestick') 
 def _load_trade_ideas(tickers: tuple) -> list:
     """
     Batch-download the universe once and score every ticker against its own
-    history. Cached for 30 minutes because the analog search re-reads 5 years
-    per ticker, and nothing here changes intraday at a rate that matters.
+    history. 15 years rather than 5 so the 120-day window still has enough
+    non-overlapping events to be worth reporting. Cached for 30 minutes because
+    the analog search re-reads that history per ticker, and nothing here changes
+    intraday at a rate that matters.
 
     Falls back to an empty list rather than raising: a scan failure should
     leave the page empty and honest, never half-populated.
@@ -547,7 +549,7 @@ def _load_trade_ideas(tickers: tuple) -> list:
     frames = {}
     for sym in symbols:
         try:
-            df = fetch_stock_data(sym, period='5y', interval='1d')
+            df = fetch_stock_data(sym, period='15y', interval='1d')
             if df is not None and not df.empty and 'Close' in df.columns:
                 frames[sym] = df['Close']
         except Exception:
@@ -620,8 +622,8 @@ if page == '📡 Daily Scanner':
 
     ctl_l, ctl_m, ctl_r = st.columns([3, 2, 1])
     with ctl_l:
-        horizon = st.radio('Forward window', [5, 10], horizontal=True,
-                           format_func=lambda h: f'{h} trading days')
+        horizon = st.radio('Example window', [5, 10, 15, 30, 120], horizontal=True,
+                           format_func=lambda h: f'{h}d')
     with ctl_m:
         if st.session_state.ideas_time:
             st.write('')
@@ -684,19 +686,33 @@ if page == '📡 Daily Scanner':
                   'bar than a fixed RSI threshold applied to every name.'
             )
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric('Analogs found', s['n'])
-            c2.metric(f'Avg {horizon}d vs SPY', f"{s['expectancy']:+.2%}")
-            c3.metric('Went up', f"{s['hit_rate']:.0%}",
-                      delta=f"{s['lift']:+.0%} vs its own baseline")
-            c4.metric('One-sided p', f"{s['p_value']:.3f}")
+            st.markdown('**How this setup resolved historically, by holding period**')
+            rows = []
+            for h in sorted(idea['stats']):
+                st_h = idea['stats'][h]
+                # lift is a FRACTION (0.02 == 2 percentage points), so it has to
+                # be scaled before formatting — otherwise every row renders '+0pp'.
+                lift_pp = st_h['lift'] * 100.0
+                rows.append({
+                    'Hold': f'{h}d',
+                    'Analogs': st_h['n'],
+                    'Avg vs SPY': f"{st_h['expectancy']:+.2%}",
+                    'Median': f"{st_h['median']:+.2%}",
+                    'Went up': f"{st_h['hit_rate']:.0%}",
+                    'vs baseline': f"{lift_pp:+.0f}pp",
+                    'Range (worst → best)': f"{st_h['worst']:+.0%} → {st_h['best']:+.0%}",
+                    'p': f"{st_h['p_value']:.3f}" if st_h['p_value'] == st_h['p_value'] else '—',
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
             st.caption(
-                f"Range across those {s['n']} analogs: worst {s['worst']:+.2%}, "
-                f"median {s['median']:+.2%}, best {s['best']:+.2%}. "
-                f"Reached +5% raw in {s['target_hits']} of {s['n']} "
-                f"(vs {s['target_base_rate']:.0%} of all days for this ticker). "
-                'All returns are relative to SPY, so market drift is removed.'
+                'All returns are **relative to SPY**, so market drift is removed — a '
+                'raw +12% while SPY also rose 12% is not the setup working. Analog '
+                'counts shrink at longer windows because events are spaced by the '
+                'holding period to keep them independent. **5 and 10 days are the '
+                'only windows that feed validation**; 15/30/120 are context, since '
+                'over months the return is mostly the ticker\'s own drift rather '
+                'than anything this setup caused.'
             )
 
             if not idea.get('confident'):

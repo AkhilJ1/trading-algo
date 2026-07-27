@@ -29,22 +29,47 @@ _RSI_PREFILTER = 38
 _universe_cache: list = []
 
 
-def get_sp500_tickers() -> list:
+def get_sp500_tickers(verbose: bool = False) -> list:
     """
     Fetch the S&P 500 component list from Wikipedia.
     Falls back to the local WATCHLIST if the request fails.
+
+    Two failures used to make this silently return the 32-name WATCHLIST, so
+    the "S&P 500 screen" had never actually scanned the S&P 500:
+
+      1. `lxml` was missing from requirements, so pandas.read_html raised
+         ImportError on every call. Now pinned.
+      2. Wikipedia answers pandas' default user-agent with HTTP 403. The page
+         is fetched explicitly with a real UA and the HTML handed to read_html.
+
+    The bare `except` that hid both is kept (a screener must not crash on a
+    network hiccup) but now reports the cause under `verbose`, so the next
+    failure is visible instead of silent.
     """
     global _universe_cache
     if _universe_cache:
         return _universe_cache
     try:
-        df = pd.read_html(
-            'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        )[0]
+        import io
+        import urllib.request
+
+        req = urllib.request.Request(
+            'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies',
+            headers={'User-Agent': 'trading-algo/1.0 (personal research screener)'},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            html = resp.read().decode('utf-8', errors='replace')
+
+        df = pd.read_html(io.StringIO(html))[0]
         tickers = [str(t).replace('.', '-') for t in df['Symbol'].tolist()]
+        if len(tickers) < 400:
+            raise ValueError(f'expected ~500 constituents, parsed {len(tickers)}')
         _universe_cache = tickers
         return tickers
-    except Exception:
+    except Exception as e:
+        if verbose:
+            print(f'[screener] S&P 500 fetch failed ({type(e).__name__}: {e}) '
+                  f'— falling back to {len(WATCHLIST)}-name WATCHLIST')
         return list(WATCHLIST)
 
 

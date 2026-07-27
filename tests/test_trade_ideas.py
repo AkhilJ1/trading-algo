@@ -13,7 +13,9 @@ import pytest
 
 from trade_ideas import (
     apply_multiple_testing_correction,
+    HORIZONS,
     MIN_ANALOGS,
+    VALIDATION_HORIZONS,
     _dedupe_events,
     evaluate_ticker,
     find_analogs,
@@ -154,7 +156,7 @@ def test_evaluate_ticker_returns_scorecard_with_sample_size():
     assert idea is not None
     assert idea["ticker"] == "TEST"
     assert 0.0 <= idea["rsi_percentile"] <= 100.0
-    assert set(idea["stats"]) <= {5, 10}
+    assert set(idea["stats"]) <= set(HORIZONS)
     for s in idea["stats"].values():
         assert s["n"] >= 0
         assert 0.0 <= s["hit_ci_low"] <= s["hit_ci_high"] <= 1.0
@@ -283,3 +285,32 @@ def test_scan_labels_direction():
     for i in scan_universe(df):
         assert i["direction"] in ("oversold", "overbought")
         assert (i["direction"] == "oversold") == (i["rsi_percentile"] < 50)
+
+
+# ── Long-horizon context ────────────────────────────────────────────────
+# 15/30/120-day windows are reported as background, never as validation:
+# independent events get scarce (120d over 15y admits ~31 at most) and at that
+# range the forward return is mostly the ticker's own drift, not the setup.
+
+def test_long_horizons_are_reported():
+    df = _synthetic_frame(n=2000)
+    bench = pd.Series(100.0, index=df.index)
+    idea = evaluate_ticker(df, bench, ticker="TEST")
+    assert idea is not None
+    assert {15, 30}.issubset(set(idea["stats"])), "long-horizon context missing"
+
+
+def test_long_horizons_do_not_decide_confidence():
+    """A wild 120d result must never by itself make a setup 'confident'."""
+    assert 120 not in VALIDATION_HORIZONS
+    assert set(VALIDATION_HORIZONS) == {5, 10}
+
+
+def test_long_horizons_have_fewer_analogs_than_short():
+    """Events are spaced by the horizon, so longer windows yield fewer of them
+    — the reason they cannot carry a validation claim."""
+    df = _synthetic_frame(n=2500)
+    bench = pd.Series(100.0, index=df.index)
+    idea = evaluate_ticker(df, bench, ticker="TEST")
+    if 5 in idea["stats"] and 120 in idea["stats"]:
+        assert idea["stats"][120]["n"] < idea["stats"][5]["n"]
