@@ -1,4 +1,6 @@
 data/cache/
+# Local snapshots of the Sheets ledgers (pull_ledgers.py) — real trading data.
+data/ledgers/
 data/predictions.csv
 data/outcomes.csv
 data/calibration.csv

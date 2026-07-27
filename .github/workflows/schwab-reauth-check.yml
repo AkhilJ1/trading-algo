@@ -50,24 +50,40 @@ jobs:
           SCHWAB_TOKEN_PATH: schwab_token.json
         run: |
           set +e
-          python schwab_token_status.py
-          echo "code=$?" >> "$GITHUB_OUTPUT"
+          out=$(python schwab_token_status.py)
+          code=$?
           set -e
+          echo "$out"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # Keep the human-readable age line for the issue/comment body.
+          {
+            echo "detail<<EOF"
+            echo "$out" | head -1
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Open re-auth issue if needed (deduped)
+      # An open issue used to suppress every later alert, so a token that died
+      # on day one went unmentioned for the next 40 days while the pipeline
+      # quietly served yfinance. Now the first detection opens an issue and each
+      # subsequent day comments on it — GitHub emails on new comments, so the
+      # reminder keeps arriving until the issue is actually closed.
+      - name: Open or escalate re-auth issue
         if: steps.status.outputs.code == '10'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DETAIL: ${{ steps.status.outputs.detail }}
         run: |
           TITLE="🔑 Schwab re-auth needed"
-          existing=$(gh issue list --state open --search "$TITLE in:title" --json number --jq 'length')
-          if [ "$existing" = "0" ]; then
-            gh issue create \
-              --title "$TITLE" \
-              --body $'Your Schwab refresh token expires within ~36 hours.\n\n**Action:** run `python schwab_auth.py` locally to mint a fresh token, then update the `SCHWAB_TOKEN` repo secret with the new `schwab_token.json` contents.\n\nUntil then the pipeline automatically falls back to yfinance, so nothing is broken — data quality just reverts to the yfinance source. Close this issue once you have re-authenticated.'
+          ACTION=$'**Action:** run `python schwab_auth.py` locally to mint a fresh token, then update the `SCHWAB_TOKEN` repo secret (`gh secret set SCHWAB_TOKEN < schwab_token.json`) *and* the Streamlit `SCHWAB_TOKEN` secret, then Reboot the app.\n\nUntil then the pipeline falls back to yfinance — nothing breaks, but every forecast recorded meanwhile is yfinance-sourced. Close this issue once re-authenticated.'
+          num=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -z "$num" ]; then
+            gh issue create --title "$TITLE" --body "$(printf '%s\n\n%s' "$DETAIL" "$ACTION")"
             echo "Opened re-auth issue."
           else
-            echo "Re-auth issue already open ($existing) — not duplicating."
+            gh issue comment "$num" \
+              --body "$(printf 'Still not re-authenticated as of %s UTC.\n\n%s\n\n%s' \
+                "$(date -u '+%Y-%m-%d %H:%M')" "$DETAIL" "$ACTION")"
+            echo "Escalated existing re-auth issue #$num."
           fi
 
       - name: Clean up token
