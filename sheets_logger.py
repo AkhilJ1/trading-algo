@@ -80,6 +80,11 @@ OUTCOME_HEADERS = [
     # scorecard can show when the call was actually made (e.g. 06:25 pre-open)
     # instead of a bare date that renders as 00:00:00.
     "pred_time",
+    # Also copied forward from the prediction row: which backend actually served
+    # the data behind this forecast. Without these on the outcome the scorecard
+    # cannot tell a Schwab-sourced call from a yfinance-fallback one, and
+    # silently averages two different systems into a single number.
+    "chain_source", "spot_source",
 ]
 # Periodic, point-in-time-honest calibration snapshot of the evidence-based
 # range engine (range_calibration.py): how often each confidence band actually

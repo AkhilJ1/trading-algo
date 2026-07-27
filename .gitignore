@@ -1,4 +1,6 @@
 data/cache/
+# Local snapshots of the Sheets ledgers (pull_ledgers.py) — real trading data.
+data/ledgers/
 data/predictions.csv
 data/outcomes.csv
 data/calibration.csv
@@ -17,3 +19,10 @@ schwab_token.json
 
 # Local virtualenv for running schwab_auth.py (Python 3.12, schwab-py needs >=3.10)
 .venv/
+
+# Claude Code local state. Agent worktrees are full checkouts of this repo
+# living inside it — staging them would commit the repo into itself. Settings
+# hold machine-specific absolute paths and a credential location, so they stay
+# local too. Shared .claude config (skills, agents) is deliberately NOT ignored.
+.claude/worktrees/
+.claude/settings.local.json

@@ -137,6 +137,10 @@ def grade_prediction(pred: dict, actual_close: float, graded_at: str = None) -> 
         "dir_correct": bool(dir_pred == dir_actual),
         "naive_abs_err": round(naive_abs_err, 4),
         "skill": round(skill, 4),
+        # Carried forward from the prediction so the scorecard can be segmented
+        # by backend. Blank on rows graded before these columns existed.
+        "chain_source": str(pred.get("chain_source", "") or ""),
+        "spot_source": str(pred.get("spot_source", "") or ""),
     }
 
 
@@ -252,12 +256,18 @@ def pending_predictions(
     return pd.DataFrame(rows).reset_index(drop=True)
 
 
-def summarize_track_record(outcomes: pd.DataFrame) -> dict:
+def summarize_track_record(outcomes: pd.DataFrame, segment_by="chain_source") -> dict:
     """
     Aggregate a graded-outcomes frame into headline track-record stats.
 
     Returns zeros/None on an empty frame rather than raising, so the dashboard
     can call it before any forecast has matured.
+
+    `segment_by` additionally breaks the same stats out per data backend under
+    the "by_source" key (pass None to skip). This is not cosmetic: when the
+    Schwab token lapses the pipeline silently falls back to yfinance, so a
+    single blended average can describe two materially different systems. Rows
+    graded before chain_source existed group under "unknown".
     """
     cols = ["close_abs_err", "naive_abs_err", "skill", "close_pct_err"]
     empty = {
@@ -266,6 +276,7 @@ def summarize_track_record(outcomes: pd.DataFrame) -> dict:
         "naive_mean_abs_err": None, "mean_skill": None,
         "skill_rate": None, "beats_naive": None,
         "in_range_rate": None, "dir_accuracy": None,
+        "by_source": {},
     }
     if outcomes is None or outcomes.empty:
         return empty
@@ -287,8 +298,16 @@ def summarize_track_record(outcomes: pd.DataFrame) -> dict:
     in_range_rate = _bool_rate(df.get("in_range"))
     dir_accuracy = _bool_rate(df.get("dir_correct"))
 
+    by_source = {}
+    if segment_by and segment_by in df.columns:
+        src = df[segment_by].fillna("").astype(str).str.strip().replace("", "unknown")
+        for name, grp in df.groupby(src):
+            # segment_by=None stops this from recursing into itself.
+            by_source[str(name)] = summarize_track_record(grp, segment_by=None)
+
     return {
         "n_graded": n,
+        "by_source": by_source,
         "mean_abs_err": round(mean_abs, 4),
         "median_abs_err": round(float(df["close_abs_err"].median()), 4),
         "mean_pct_err": round(float(df["close_pct_err"].mean()), 4)

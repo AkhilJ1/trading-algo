@@ -22,7 +22,7 @@ Usage:
 import sys
 
 from track_record import grade_prediction, pending_predictions, prediction_is_post_close
-from grade_predictions import _realized_close
+from grade_predictions import _GRADE_LOOKBACK, _realized_close
 from sheets_logger import (
     is_sheets_available,
     read_pin_forecasts, read_pin_forecasts_csv,
@@ -48,6 +48,8 @@ def main(argv=None) -> int:
         return 0
 
     graded = 0
+    pending = 0
+    unavailable = 0
     for _, p in pend.iterrows():
         pred = p.to_dict()
         ticker = str(pred.get("ticker", "")).upper()
@@ -58,9 +60,17 @@ def main(argv=None) -> int:
                 "session closed (outcome was already known; not a forecast)"
             )
             continue
-        actual = _realized_close(ticker, expiry)
-        if actual is None:
+        actual, status = _realized_close(ticker, expiry)
+        if status == "pending":
             print(f"  [{ticker} {expiry}] realized close not available yet — still pending")
+            pending += 1
+            continue
+        if status == "unavailable":
+            print(
+                f"  [{ticker} {expiry}] un-gradeable — no close on record within "
+                f"the {_GRADE_LOOKBACK} lookback (expiry too old, or not a trading day)"
+            )
+            unavailable += 1
             continue
         try:
             outcome = grade_prediction(pred, actual)
@@ -86,7 +96,10 @@ def main(argv=None) -> int:
         else:
             print(f"  [{ticker} {expiry}] FAILED to log pin outcome")
 
-    print(f"\n  Done — graded {graded} pin forecast(s).\n")
+    print(
+        f"\n  Done — graded {graded} pin forecast(s); "
+        f"{pending} still pending, {unavailable} un-gradeable.\n"
+    )
     return 0
 
 
