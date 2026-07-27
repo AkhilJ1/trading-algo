@@ -145,7 +145,7 @@ def macd_histogram(close: pd.Series, fast=12, slow=26, signal=9) -> pd.Series:
 
 
 def scan_universe(price_frame: pd.DataFrame, benchmark: str = "SPY",
-                  lookback: int = 252) -> list:
+                  lookback: int = 252, ohlcv: Optional[dict] = None) -> list:
     """
     Evaluate every column of a wide close-price frame and rank by how UNUSUAL
     each ticker currently is — not by predicted profit.
@@ -157,6 +157,10 @@ def scan_universe(price_frame: pd.DataFrame, benchmark: str = "SPY",
     the data does support — this ticker is behaving atypically for itself — and
     leaves the forward-looking judgement to the human, with the historical
     distribution shown alongside so that judgement is informed.
+
+    `ohlcv` optionally supplies the full daily bars per ticker. Closes alone are
+    enough to rank unusualness, but the entry-confirmation checklist needs highs,
+    lows and volume — pass them and every idea gains a `confirmations` list.
     """
     if benchmark not in price_frame.columns:
         return []
@@ -168,8 +172,13 @@ def scan_universe(price_frame: pd.DataFrame, benchmark: str = "SPY",
         close = price_frame[ticker].dropna()
         if close.empty:
             continue
-        idea = evaluate_ticker(pd.DataFrame({"Close": close}), bench,
-                               ticker=ticker, lookback=lookback)
+        bars = (ohlcv or {}).get(ticker)
+        usable_bars = (
+            bars is not None and not bars.empty and "Close" in bars.columns
+        )
+        idea = evaluate_ticker(bars if usable_bars else pd.DataFrame({"Close": close}),
+                               bench, ticker=ticker, lookback=lookback,
+                               with_confirmations=usable_bars)
         if idea is None:
             continue
         macd_pct = percentile_of_last(macd_histogram(close), lookback)
@@ -179,7 +188,6 @@ def scan_universe(price_frame: pd.DataFrame, benchmark: str = "SPY",
         rsi_extremity = abs(idea["rsi_percentile"] - 50.0)
         macd_extremity = abs(macd_pct - 50.0) if macd_pct is not None else 0.0
         idea["unusualness"] = round((rsi_extremity + macd_extremity) / 2.0, 1)
-        idea["direction"] = "oversold" if idea["rsi_percentile"] < 50 else "overbought"
         # Both indicators at the same extreme. Reported because it is what the
         # user asked to see — NOT because it was found predictive. Tested
         # out-of-sample with date-clustered errors it was p=0.67.
@@ -288,27 +296,40 @@ def _dedupe_events(idx: pd.DatetimeIndex, min_gap: int) -> list:
     return kept
 
 
+def rolling_percentile(feat: pd.Series, lookback: int = 252) -> pd.Series:
+    """
+    Each bar's percentile within its OWN trailing window.
+
+    Rolling rather than full-sample: judging a 2019 bar against the whole
+    15-year distribution would leak the future into the comparison. Exposed
+    separately because it is the expensive step — one `rolling.apply` over
+    15 years per ticker — and every horizon reuses the same answer.
+    """
+    return feat.dropna().rolling(lookback).apply(
+        lambda w: (w < w[-1]).mean() * 100.0, raw=True
+    )
+
+
 def find_analogs(
     feat: pd.Series,
     target_pct: float,
     horizon: int,
     tolerance: float = PERCENTILE_TOLERANCE,
     lookback: int = 252,
+    roll_pct: Optional[pd.Series] = None,
 ) -> list:
     """
     Positions in history where `feat` sat at a similar percentile to today.
 
-    Percentiles are computed in a ROLLING window, so each historical bar is
-    judged against what was known at that time — using today's full-sample
-    distribution would leak the future into the comparison.
+    Pass `roll_pct` when the caller already has the rolling percentiles for
+    this exact series, to avoid recomputing them once per horizon.
     """
     s = feat.dropna()
     if len(s) < lookback + horizon + 5:
         return []
 
-    roll_pct = s.rolling(lookback).apply(
-        lambda w: (w < w[-1]).mean() * 100.0, raw=True
-    )
+    if roll_pct is None:
+        roll_pct = rolling_percentile(s, lookback)
     match = roll_pct.sub(target_pct).abs() <= tolerance
 
     # Drop the tail that has no room for a forward return yet.
@@ -425,6 +446,7 @@ def evaluate_ticker(
     bench: pd.Series,
     ticker: str = "",
     lookback: int = 252,
+    with_confirmations: bool = False,
 ) -> Optional[dict]:
     """
     Full evaluation for one ticker: how unusual is it right now, and what
@@ -433,6 +455,10 @@ def evaluate_ticker(
     Returns None when there is not enough price history to say anything. A
     returned idea is NOT a recommendation — it is a description of a base rate
     with its sample size attached.
+
+    With `with_confirmations`, the idea also carries the entry-confirmation
+    checklist — what to watch for before acting — measured against these same
+    analog moments. Requires `df` to hold real OHLCV, not just closes.
     """
     if df is None or df.empty or "Close" not in df.columns:
         return None
@@ -445,22 +471,26 @@ def evaluate_ticker(
     if rsi_pct is None:
         return None
 
-    stats = {}
+    roll_pct = rolling_percentile(rsi, lookback)
+    stats, setups = {}, {}
     for h in HORIZONS:
-        positions = find_analogs(rsi, rsi_pct, h, lookback=lookback)
+        positions = find_analogs(rsi, rsi_pct, h, lookback=lookback, roll_pct=roll_pct)
         s = score_analogs(close, bench, positions, h)
         if s is not None:
             stats[h] = s
+            setups[h] = positions
 
     if not stats:
         return None
 
     primary = stats.get(HORIZONS[0]) or next(iter(stats.values()))
     validation = [s for h, s in stats.items() if h in VALIDATION_HORIZONS]
-    return {
+    rsi_pct_shown = round(rsi_pct, 1)
+    idea = {
         "ticker": ticker,
         "rsi": round(float(rsi.iloc[-1]), 1),
-        "rsi_percentile": round(rsi_pct, 1),
+        "rsi_percentile": rsi_pct_shown,
+        "direction": "oversold" if rsi_pct_shown < 50 else "overbought",
         "last_close": round(float(close.iloc[-1]), 2),
         "stats": {h: s.as_dict() for h, s in stats.items()},
         "n_analogs": primary.n,
@@ -484,3 +514,12 @@ def evaluate_ticker(
             if validation and primary.n >= MIN_ANALOGS else float("-inf")
         ),
     }
+
+    if with_confirmations:
+        # Imported here, not at module scope: entry_confirmation builds on this
+        # module's analog machinery, so a top-level import either way would be
+        # circular. By the time this line runs, trade_ideas is fully defined.
+        from entry_confirmation import attach_confirmations
+        attach_confirmations(idea, df, bench, setups)
+
+    return idea

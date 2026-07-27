@@ -539,6 +539,10 @@ def _load_trade_ideas(tickers: tuple) -> list:
     the analog search re-reads that history per ticker, and nothing here changes
     intraday at a rate that matters.
 
+    The full OHLCV frames are kept alongside the closes, not discarded: closes
+    alone rank unusualness, but the entry-confirmation checklist needs highs,
+    lows and volume to see a wick reclaim or a volume expansion.
+
     Falls back to an empty list rather than raising: a scan failure should
     leave the page empty and honest, never half-populated.
     """
@@ -546,17 +550,18 @@ def _load_trade_ideas(tickers: tuple) -> list:
     from trade_ideas import scan_universe
 
     symbols = list(dict.fromkeys(list(tickers) + ['SPY']))
-    frames = {}
+    frames, bars = {}, {}
     for sym in symbols:
         try:
             df = fetch_stock_data(sym, period='15y', interval='1d')
             if df is not None and not df.empty and 'Close' in df.columns:
                 frames[sym] = df['Close']
+                bars[sym] = df
         except Exception:
             continue
     if 'SPY' not in frames:
         return []
-    return scan_universe(pd.DataFrame(frames))
+    return scan_universe(pd.DataFrame(frames), ohlcv=bars)
 
 
 def _tier_badge(tier: int) -> str:
@@ -567,6 +572,70 @@ def _tier_badge(tier: int) -> str:
         return '<span style="background:#e65100;color:#ffcc80;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;">VALIDATED</span>'
     else:
         return '<span style="background:#424242;color:#bdbdbd;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;">SPECULATIVE</span>'
+
+
+def _render_confirmations(idea: dict, horizon: int) -> None:
+    """
+    The "what do I actually look for" section of an idea.
+
+    An unusual RSI reading is not something you can act on — oversold can stay
+    oversold for six weeks. This lists the chart-visible things that would say
+    the move has turned, each with how often it historically showed up after
+    this ticker looked like this and what the forward return was when it did.
+
+    Deliberately NOT sorted by that return, and deliberately carrying no
+    confidence badge: eight confirmations across a 31-ticker watchlist is a lot
+    of comparisons, and the best-looking one is what noise produces.
+    """
+    from entry_confirmation import confirmation_table
+
+    rows = idea.get('confirmations') or []
+    if not rows:
+        return
+
+    bull = idea.get('direction') == 'oversold'
+    wait = idea.get('max_wait', 10)
+    showing = idea.get('confirmations_showing', 0)
+
+    st.markdown(
+        '**What to watch for before buying**' if bull else
+        '**What would say this run is rolling over**'
+    )
+    st.caption(
+        ('Oversold can stay oversold for weeks. These are the things that would say '
+         'the fall has actually stopped — all of them readable on a 1-year daily chart.')
+        if bull else
+        ('Overbought can keep going for weeks. These are the things that would say '
+         'the run is finally stalling — all of them readable on a 1-year daily chart.')
+    )
+    st.markdown(
+        f"**{showing} of {len(rows)}** are showing on the chart right now."
+        if showing else
+        f"**None of the {len(rows)}** are showing on the chart yet."
+    )
+
+    st.dataframe(
+        pd.DataFrame(confirmation_table(idea, horizon, compact=IS_MOBILE)),
+        hide_index=True, use_container_width=True,
+    )
+
+    st.caption(
+        f'**Showed up** is how often the confirmation appeared within {wait} sessions of '
+        f'{idea["ticker"]} looking the way it does today — the rest of the time you would '
+        'have waited and never got a signal, so those are trades not taken rather than '
+        f'losses. **{horizon}d vs SPY** measures buying at the confirmation bar instead of '
+        'the moment the setup appeared, and **vs not waiting** is the difference between '
+        'the two. Rows marked *too few* had fewer than 10 independent occurrences — not '
+        'enough to put a number on.\n\n'
+        'Two reasons to read the last two columns loosely. Waiting also moves your entry '
+        'to a later bar at a different price, so part of any gap is timing rather than the '
+        'confirmation telling you something. And with eight confirmations checked on every '
+        'ticker, the best-looking row is roughly what chance alone produces. Treat these as '
+        'descriptions of what happened, not a ranking of what works.'
+    )
+
+    st.markdown('**Where to find these on a 1-year daily chart**')
+    st.markdown('\n'.join(f'- **{r["label"]}** — {r["where"]}' for r in rows))
 
 
 def _render_consensus_inline(cons: dict) -> None:
@@ -610,6 +679,11 @@ if page == '📡 Daily Scanner':
         '**What this page is.** It surfaces tickers whose RSI/MACD are unusual '
         '*relative to their own history*, and shows what actually happened the '
         'last time they looked like this — wins and losses.\n\n'
+        '**What to do with that.** Open any ticker for its *confirmation '
+        'checklist* — the chart-visible things that would say the move has '
+        'actually turned (RSI grinding back up alongside price, a reclaim of '
+        'the 20-day average, a higher low), each with how often it showed up '
+        'after this ticker last looked like this.\n\n'
         '**What it is not.** It is not a list of predicted winners. These '
         'signals were tested out-of-sample with date-clustered errors and showed '
         'no significant edge (p ≈ 0.5–0.8). Treat the base rates as context for '
@@ -685,6 +759,8 @@ if page == '📡 Daily Scanner':
                 + f". That is {idea['direction']} *for this ticker* — which is a different "
                   'bar than a fixed RSI threshold applied to every name.'
             )
+
+            _render_confirmations(idea, horizon)
 
             st.markdown('**How this setup resolved historically, by holding period**')
             rows = []
