@@ -1,0 +1,96 @@
+name: Ledger Source Alarm
+
+# Watches what actually landed in the ledger, not whether a credential looks
+# valid. The 2026-06→07 outage was invisible to every existing check: the
+# workflows exited 0, the daily health probe passed, and the re-auth notifier
+# was measuring token age — while every recorded forecast came from yfinance.
+# Two months of track record turned out to be measuring the wrong system.
+#
+# This asks the only question that matters: did the data we intended to collect
+# actually get written? That catches expired tokens, corrupted secrets, failed
+# quality gates, provider outages and bad deploys with one check, because it
+# looks at the outcome rather than at any single cause.
+#
+# Runs after the trading day so the session's rows are already recorded.
+
+on:
+  schedule:
+    # 01:30 UTC = ~18:30 PT, comfortably after the post-close recorder.
+    - cron: "30 1 * * 2-6"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ledger-source-alarm
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write Google service-account credentials
+        env:
+          GCP_SA: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: printf '%s' "$GCP_SA" > "${{ github.workspace }}/gcp_sa.json"
+
+      - name: Check recorded chain_source
+        id: alarm
+        env:
+          GOOGLE_SHEETS_CREDS: ${{ github.workspace }}/gcp_sa.json
+          DATA_PROVIDER: schwab
+        run: |
+          set +e
+          out=$(python ledger_source_alarm.py)
+          code=$?
+          set -e
+          echo "$out"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          {
+            echo "detail<<EOF"
+            echo "$out" | grep -E '^\s+(\[|✗)' || true
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Same escalation shape as the re-auth check: open once, then comment
+      # daily. An open issue must never silence the next alert — that is exactly
+      # how the original outage stayed hidden for 40 days.
+      - name: Open or escalate source alarm
+        if: steps.alarm.outputs.code == '10'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DETAIL: ${{ steps.alarm.outputs.detail }}
+        run: |
+          TITLE="📉 Ledger is not being built from Schwab"
+          ACTION=$'The pipeline is still recording, so nothing looks broken from the outside — but the forecasts being written right now are not the ones you think you are collecting, and any track record built from them measures the fallback.\n\n**Most likely cause:** the `SCHWAB_TOKEN` repo secret has expired (7-day life, does not rotate).\n\n**Action:**\n```\ncd .claude/worktrees/schwab-migration\n.venv/bin/python schwab_auth.py\ngh secret set SCHWAB_TOKEN < schwab_token.json\n.venv/bin/python make_streamlit_secrets.py\n```\nUpdate BOTH the GitHub secret and the Streamlit secret — updating only one is what caused the 2026-06 outage. Close this issue once recorded rows show `chain_source: schwab` again.'
+          num=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -z "$num" ]; then
+            gh issue create --title "$TITLE" --body "$(printf '%s\n\n%s' "$DETAIL" "$ACTION")"
+            echo "Opened source alarm issue."
+          else
+            gh issue comment "$num" \
+              --body "$(printf 'Still off-source as of %s UTC.\n\n%s\n\n%s' \
+                "$(date -u '+%Y-%m-%d %H:%M')" "$DETAIL" "$ACTION")"
+            echo "Escalated existing source alarm #$num."
+          fi
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f "${{ github.workspace }}/gcp_sa.json"
