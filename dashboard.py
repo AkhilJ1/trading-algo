@@ -690,9 +690,18 @@ if page == '📡 Daily Scanner':
         'your own judgement, not as a forecast.'
     )
 
+    # Bump whenever the scan's output shape changes. A tab that is already open
+    # holds its previous `ideas` in session state, and Streamlit's hot reload
+    # re-runs the script WITHOUT clearing it — so after a code change the page
+    # would keep rendering old idea dicts that lack the new keys, and any new
+    # section would silently draw nothing. The marker forces one re-scan
+    # instead of leaving the user to guess that "Re-scan" is required.
+    IDEAS_SCHEMA = 2
+
     if 'ideas' not in st.session_state:
         st.session_state.ideas = None
         st.session_state.ideas_time = None
+        st.session_state.ideas_schema = None
 
     ctl_l, ctl_m, ctl_r = st.columns([3, 2, 1])
     with ctl_l:
@@ -711,10 +720,12 @@ if page == '📡 Daily Scanner':
         value=True,
     )
 
-    if st.session_state.ideas is None or rescan:
+    stale = st.session_state.get('ideas_schema') != IDEAS_SCHEMA
+    if st.session_state.ideas is None or stale or rescan:
         with st.spinner('Scanning watchlist and searching each ticker\'s history…'):
             st.session_state.ideas = _load_trade_ideas(tuple(WATCHLIST))
             st.session_state.ideas_time = datetime.now().strftime('%H:%M:%S')
+            st.session_state.ideas_schema = IDEAS_SCHEMA
 
     ideas = st.session_state.ideas or []
     if only_extreme:
