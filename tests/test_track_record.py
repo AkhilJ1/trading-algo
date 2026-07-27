@@ -334,3 +334,50 @@ def test_graded_outcome_carries_pred_time_and_pacific_graded_at():
     assert out["pred_time"] == "2026-06-15 13:16:00"
     # graded_at is a parseable wall-clock stamp (Pacific by construction).
     assert pd.to_datetime(out["graded_at"]) is not pd.NaT
+
+
+# ── pin_mode segmentation ───────────────────────────────────────────────
+# Short gamma now projects continuation ('drift') instead of pinning ('pin').
+# Those are two different models writing into one estimated_close column, so
+# the scorecard has to be able to score them apart — the same reason
+# chain_source segmentation exists.
+
+def test_grade_prediction_carries_pin_mode_forward():
+    pred = {
+        "date": "2026-07-20", "ticker": "SPY", "expiry": "2026-07-21",
+        "spot_price": 600.0, "estimated_close": 602.0,
+        "floor": 596.0, "ceiling": 604.0, "pin_mode": "drift",
+    }
+    out = grade_prediction(pred, 603.0)
+    assert out["pin_mode"] == "drift"
+
+
+def test_grade_prediction_pin_mode_blank_when_absent():
+    """Rows recorded before pin_mode existed must not blow up the grader."""
+    pred = {
+        "date": "2026-07-20", "ticker": "SPY", "expiry": "2026-07-21",
+        "spot_price": 600.0, "estimated_close": 602.0,
+        "floor": 596.0, "ceiling": 604.0,
+    }
+    assert grade_prediction(pred, 603.0)["pin_mode"] == ""
+
+
+def test_summary_segments_by_pin_mode():
+    """A good pin model and a bad drift model must not average into one number."""
+    outcomes = pd.DataFrame([
+        # pin rows: tight errors
+        {"close_abs_err": 1.0, "naive_abs_err": 3.0, "skill": 2.0,
+         "close_pct_err": 0.1, "in_range": True, "dir_correct": True, "pin_mode": "pin"},
+        {"close_abs_err": 1.0, "naive_abs_err": 3.0, "skill": 2.0,
+         "close_pct_err": 0.1, "in_range": True, "dir_correct": True, "pin_mode": "pin"},
+        # drift rows: wide errors
+        {"close_abs_err": 9.0, "naive_abs_err": 3.0, "skill": -6.0,
+         "close_pct_err": 0.9, "in_range": False, "dir_correct": False, "pin_mode": "drift"},
+    ])
+    s = summarize_track_record(outcomes, segment_by="pin_mode")
+
+    assert set(s["by_source"]) == {"pin", "drift"}
+    assert s["by_source"]["pin"]["beats_naive"] is True
+    assert s["by_source"]["drift"]["beats_naive"] is False
+    # The blend hides that one half works and the other does not.
+    assert s["by_source"]["pin"]["mean_abs_err"] < s["mean_abs_err"] < s["by_source"]["drift"]["mean_abs_err"]

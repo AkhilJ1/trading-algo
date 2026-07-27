@@ -62,6 +62,12 @@ PREDICTION_HEADERS = [
     #                  was built from ('schwab' or 'yfinance'), so the ledger
     #                  itself shows whether Schwab or the fallback was used.
     "spot_source", "chain_source",
+    #   pin_mode     — which mechanism produced estimated_close: 'pin' (dragged
+    #                  toward the gamma/max-pain magnet) or 'drift' (short
+    #                  gamma, projected continuation). These are two different
+    #                  models sharing one column, so the scorecard must be able
+    #                  to score them apart instead of averaging them together.
+    "pin_mode",
 ]
 WEIGHT_HEADERS = [
     "date", "weight_name", "old_value", "new_value", "reason",
@@ -85,6 +91,10 @@ OUTCOME_HEADERS = [
     # cannot tell a Schwab-sourced call from a yfinance-fallback one, and
     # silently averages two different systems into a single number.
     "chain_source", "spot_source",
+    # Copied forward likewise: 'pin' vs 'drift'. A drift forecast comes from a
+    # different mechanism than a pin forecast, so blending them into one MAE
+    # hides which of the two actually works.
+    "pin_mode",
 ]
 # Periodic, point-in-time-honest calibration snapshot of the evidence-based
 # range engine (range_calibration.py): how often each confidence band actually
@@ -215,7 +225,7 @@ def _prediction_row(
     bias, confidence, expiry,
     vix=None, gex_net=None, regime=None,
     estimated_close=None, pin_target=None, max_pain=None,
-    spot_source="", chain_source="",
+    spot_source="", chain_source="", pin_mode="",
 ):
     """Build a Predictions row in PREDICTION_HEADERS order (shared by sheet/CSV)."""
     now = pacific_now().strftime("%Y-%m-%d %H:%M:%S")
@@ -226,7 +236,7 @@ def _prediction_row(
         _num_or_blank(vix), _num_or_blank(gex_net), regime or "",
         _num_or_blank(estimated_close), _num_or_blank(pin_target),
         _num_or_blank(max_pain),
-        spot_source or "", chain_source or "",
+        spot_source or "", chain_source or "", pin_mode or "",
     ])
 
 
@@ -235,7 +245,7 @@ def log_prediction(
     bias, confidence, expiry,
     vix=None, gex_net=None, regime=None,
     estimated_close=None, pin_target=None, max_pain=None,
-    spot_source="", chain_source="",
+    spot_source="", chain_source="", pin_mode="",
     sheet=GSHEET_PREDICTIONS_SHEET,
 ) -> bool:
     """Append one prediction row. Returns True on success.
@@ -251,7 +261,7 @@ def log_prediction(
             date_str, ticker, spot_price, floor, ceiling,
             bias, confidence, expiry, vix, gex_net, regime,
             estimated_close, pin_target, max_pain,
-            spot_source, chain_source,
+            spot_source, chain_source, pin_mode,
         )
         ws.append_row(row, value_input_option="RAW")
         return True
@@ -382,7 +392,7 @@ def log_prediction_csv(
     bias, confidence, expiry,
     vix=None, gex_net=None, regime=None,
     estimated_close=None, pin_target=None, max_pain=None,
-    spot_source="", chain_source="",
+    spot_source="", chain_source="", pin_mode="",
     path_name='predictions.csv',
 ) -> bool:
     """Fallback: log prediction to a local CSV (`path_name` under data/)."""
@@ -390,7 +400,7 @@ def log_prediction_csv(
         date_str, ticker, spot_price, floor, ceiling,
         bias, confidence, expiry, vix, gex_net, regime,
         estimated_close, pin_target, max_pain,
-        spot_source, chain_source,
+        spot_source, chain_source, pin_mode,
     )
     return _append_csv(_data_path(path_name), PREDICTION_HEADERS, row)
 

@@ -130,6 +130,29 @@ REACTION_MIN_DISTANCE_PCT = 0.1
 # close to spot all session.
 PIN_BRACKET_MIN_SIGMA = 0.35
 
+# Gamma-magnet reachability window, in daily expected moves. The pin magnet is
+# the peak positive-GEX strike, but searching ALL strikes just returns the
+# largest wall on the board — in SPY that is dealer long gamma from customer
+# call selling, which sits structurally above spot. Measured over 104 logged
+# forecasts the unwindowed magnet sat a median +2.28 daily EM above spot and was
+# beyond 1 EM 94% of the time, so `estimate = anchor + pull * (pin_target -
+# anchor)` with pull >= 0 could never resolve below spot: 0 of 30 graded pin
+# forecasts ever called "down". Restricting the search to strikes price can
+# plausibly reach by expiry lets near-money put gamma win the argmax when it
+# dominates, which is what makes a downward pin expressible at all.
+PIN_MAGNET_MAX_SIGMA = 1.0
+
+# Short-gamma (negative GEX) drift. When dealers are short gamma they hedge
+# pro-cyclically — selling into weakness, buying into strength — so moves are
+# amplified rather than pinned, and realized moves frequently exceed the
+# expected move. The pin engine previously drove `pull` to 0 in this regime,
+# collapsing the estimate onto spot exactly and emitting "flat" (graded as a
+# directional miss) on ~38% of sessions. Below this gamma_strength the engine
+# switches from pinning to drift: it projects continuation in the prevailing
+# direction by this fraction of the daily expected move.
+SHORT_GAMMA_THRESHOLD = 0.25
+SHORT_GAMMA_DRIFT_EM = 0.50
+
 # ── Chart Indicators ────────────────────────────────────────────────────
 VWAP_WINDOW = 20                # Rolling window for daily VWAP
 ZSCORE_WINDOW = 50              # Lookback for Z-score calculation

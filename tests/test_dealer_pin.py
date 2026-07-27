@@ -76,12 +76,14 @@ def test_gamma_magnet_prefers_strike_evaluated_gex():
     near-delta-spike on 0DTE) and made the pin chase the tape."""
     gex = pd.DataFrame([
         # net_gex says the magnet is the ATM 600 strike (spot-gamma artifact);
-        # net_gex_k says the dealer commitment actually lives at 610.
+        # net_gex_k says the dealer commitment actually lives at 603. Both sit
+        # inside the reachability window so this test isolates COLUMN choice —
+        # window behaviour is covered separately below.
         {'strike': 600.0, 'net_gex': 9e8, 'net_gex_k': 2e8},
-        {'strike': 610.0, 'net_gex': 1e8, 'net_gex_k': 8e8},
+        {'strike': 603.0, 'net_gex': 1e8, 'net_gex_k': 8e8},
     ])
     out = compute_dealer_pin_close(SPOT, 601.0, gex, FRACTALS, IV_RANGE, 'transitional')
-    assert out['gamma_pin_strike'] == 610.0
+    assert out['gamma_pin_strike'] == 603.0
     # Aggregate regime still reads the spot-evaluated column.
     assert out['gamma_strength'] == 1.0
 
@@ -168,3 +170,95 @@ def test_max_pain_prefer_volume_falls_back_to_oi_when_no_volume():
     puts = pd.DataFrame({'strike': [595.0, 605.0],
                          'openInterest': [0, 50000], 'volume': [0, 0]})
     assert compute_max_pain(calls, puts, 600.0, prefer_volume=True) == 605.0
+
+
+# ── Directional asymmetry regression ────────────────────────────────────
+# Audit of 104 logged forecasts found the magnet sat a median +2.28 daily EM
+# ABOVE spot and beyond 1 EM 94% of the time, because argmax over all strikes
+# just returns the board's largest wall (in SPY, the long-gamma call stack).
+# With `estimate = anchor + pull * (pin_target - anchor)` and pull >= 0, that
+# made a downward estimate mathematically unreachable: 0 of 30 graded pin
+# forecasts ever called "down". These lock the fix in place.
+
+def test_magnet_ignores_unreachable_wall_beyond_expected_move():
+    """The biggest wall on the board is not a pin candidate if price cannot
+    reach it by expiry. Window is 1.0 * daily_em = 4.0 -> [596, 604]."""
+    gex = _gex([(603, 2e8), (640, 9e9)])
+    out = compute_dealer_pin_close(SPOT, 601.0, gex, FRACTALS, IV_RANGE, 'transitional')
+
+    assert out['gamma_pin_strike'] == 603.0, "far 640 wall must not win the argmax"
+    assert out['magnet_windowed'] is True
+
+
+def test_magnet_can_sit_below_spot_when_put_gamma_dominates():
+    """THE core regression: near-money put-side gamma must be able to win, so
+    the estimate can resolve DOWNWARD. Previously impossible by construction."""
+    gex = _gex([(597, 9e8), (603, 1e8)])
+    out = compute_dealer_pin_close(SPOT, 598.0, gex, FRACTALS, IV_RANGE, 'transitional')
+
+    assert out['gamma_pin_strike'] == 597.0
+    assert out['pin_target'] < SPOT
+    assert out['estimated_close'] < SPOT, "a down pin must be expressible"
+    assert out['direction'] == 'down'
+
+
+def test_magnet_falls_back_to_full_board_when_window_is_empty():
+    """If nothing positive sits inside the window, keep the old behaviour
+    rather than losing the magnet entirely."""
+    gex = _gex([(640, 9e9)])
+    out = compute_dealer_pin_close(SPOT, 601.0, gex, FRACTALS, IV_RANGE, 'transitional')
+
+    assert out['gamma_pin_strike'] == 640.0
+    assert out['magnet_windowed'] is False
+
+
+# ── Short-gamma drift ───────────────────────────────────────────────────
+
+def _short_gamma_gex():
+    """Overwhelmingly negative GEX -> gamma_strength below the drift threshold."""
+    return _gex([(597, -9e8), (600, -8e8), (603, -9e8)])
+
+
+def test_short_gamma_projects_drift_instead_of_collapsing_onto_spot():
+    """Short gamma is amplification, not a weak pin. Previously pull -> 0 put
+    the estimate exactly on spot and it was graded as a directional miss."""
+    out = compute_dealer_pin_close(
+        SPOT, 601.0, _short_gamma_gex(), FRACTALS, IV_RANGE, 'trending',
+        momentum_sign=-1.0,
+    )
+
+    assert out['pin_mode'] == 'drift'
+    assert out['estimated_close'] < SPOT, "down momentum must project downward"
+    assert out['direction'] == 'down'
+    assert abs(out['estimated_close'] - SPOT) > 0.01, "must not land on spot"
+
+
+def test_short_gamma_drift_follows_momentum_sign_upward():
+    out = compute_dealer_pin_close(
+        SPOT, 601.0, _short_gamma_gex(), FRACTALS, IV_RANGE, 'trending',
+        momentum_sign=1.0,
+    )
+    assert out['pin_mode'] == 'drift'
+    assert out['estimated_close'] > SPOT
+    assert out['direction'] == 'up'
+
+
+def test_short_gamma_without_momentum_stays_on_the_pin_path():
+    """No usable momentum sign => nothing to continue. Fall back to pinning
+    rather than inventing a direction."""
+    out = compute_dealer_pin_close(
+        SPOT, 601.0, _short_gamma_gex(), FRACTALS, IV_RANGE, 'trending',
+        momentum_sign=None,
+    )
+    assert out['pin_mode'] == 'pin'
+
+
+def test_long_gamma_ignores_momentum_and_still_pins():
+    """Momentum must not leak into the pin path — long gamma is mean-reverting,
+    so a strong momentum sign should not turn it into a drift forecast."""
+    gex = _gex([(603, 9e8), (600, 5e8)])
+    out = compute_dealer_pin_close(
+        SPOT, 601.0, gex, FRACTALS, IV_RANGE, 'transitional', momentum_sign=-1.0,
+    )
+    assert out['pin_mode'] == 'pin'
+    assert out['estimated_close'] > SPOT, "should still be dragged to the 603 magnet"

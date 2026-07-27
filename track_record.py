@@ -141,6 +141,10 @@ def grade_prediction(pred: dict, actual_close: float, graded_at: str = None) -> 
         # by backend. Blank on rows graded before these columns existed.
         "chain_source": str(pred.get("chain_source", "") or ""),
         "spot_source": str(pred.get("spot_source", "") or ""),
+        # 'pin' vs 'drift' — two different mechanisms behind estimated_close.
+        # Segmenting on this is what stops the drift model's errors from being
+        # averaged into the pin model's and vice versa.
+        "pin_mode": str(pred.get("pin_mode", "") or ""),
     }
 
 
