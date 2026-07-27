@@ -59,15 +59,21 @@ def _fetch_vix():
 
 
 def _pin_close_fields(result: dict):
-    """Pull the dealer-pin forecast scalars we later grade (item 4)."""
+    """Pull the dealer-pin forecast scalars we later grade (item 4).
+
+    Also returns pin_mode ('pin' or 'drift'): short gamma projects continuation
+    instead of pinning, and the two mechanisms have to be scored separately.
+    Blank when the engine predates the field.
+    """
     pin = result.get("estimated_close")
     if isinstance(pin, dict):
         return (
             pin.get("estimated_close"),
             pin.get("pin_target"),
             pin.get("max_pain", result.get("max_pain")),
+            pin.get("pin_mode", ""),
         )
-    return None, None, result.get("max_pain")
+    return None, None, result.get("max_pain"), ""
 
 
 def record_ticker(ticker: str, sheets_ok: bool) -> bool:
@@ -99,7 +105,7 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
 
     vix_val, regime = _fetch_vix()
     gex_net = _net_gex(result)
-    est_close, pin_target, max_pain = _pin_close_fields(result)
+    est_close, pin_target, max_pain, pin_mode = _pin_close_fields(result)
 
     kwargs = dict(
         date_str=result.get("timestamp", "")[:10],
@@ -116,6 +122,9 @@ def record_ticker(ticker: str, sheets_ok: bool) -> bool:
         estimated_close=est_close,
         pin_target=pin_target,
         max_pain=max_pain,
+        # Which mechanism produced est_close ('pin' or 'drift') — the scorecard
+        # scores the two apart rather than averaging them.
+        pin_mode=pin_mode,
         # Provenance for data-accuracy auditing: which spot the estimate was
         # anchored on ('daily_close' after the close) and which backend served
         # the option chain it was built from ('schwab' / 'yfinance').

@@ -33,6 +33,7 @@ from config import (
     LEVEL_SNAP_TOLERANCE_PCT, LEVEL_SNAP_MIN_SIGMA, LEVEL_SNAP_MAX_SIGMA,
     LEVEL_SNAP_BLEND_BASE, LEVEL_SNAP_BLEND_STEP, LEVEL_SNAP_BLEND_MAX,
     PIN_BRACKET_MIN_SIGMA, REACTION_MIN_DISTANCE_PCT, PRIMARY_BAND_LABEL,
+    PIN_MAGNET_MAX_SIGMA, SHORT_GAMMA_THRESHOLD, SHORT_GAMMA_DRIFT_EM,
 )
 from options_fetcher import fetch_options_chain, fetch_expiration_dates
 from sheets_logger import pacific_now
@@ -1031,6 +1032,7 @@ def compute_dealer_pin_close(
     neurals: dict = None,
     vectors: dict = None,
     anchor_price: Optional[float] = None,
+    momentum_sign: Optional[float] = None,
 ) -> dict:
     """
     Estimate where dealers are incentivized to pin the underlying into expiry —
@@ -1071,6 +1073,7 @@ def compute_dealer_pin_close(
     #    "max positive net_gex strike" was just "the strike nearest spot" and
     #    dragged the pin estimate onto the live price all session.
     pin_strike = None
+    pin_strike_windowed = False  # did the reachability window actually bind?
     gamma_strength = 0.5  # 0 = all short gamma (slippery), 1 = all long gamma (sticky)
     if gex_df is not None and not gex_df.empty and 'net_gex' in gex_df.columns:
         net = gex_df['net_gex']
@@ -1079,8 +1082,19 @@ def compute_dealer_pin_close(
             gamma_strength = float(net[net > 0].sum() / total_abs)
         col = _gex_level_col(gex_df)
         pos_rows = gex_df[gex_df[col] > 0]
+        # Only strikes price can plausibly reach by expiry are pin candidates.
+        # Unwindowed, the argmax is simply the board's largest wall — in SPY the
+        # long-gamma call stack well above spot — so the magnet, and therefore
+        # the estimate, could never resolve downward. Windowing lets near-money
+        # put gamma win when it dominates, which is what makes a "down" pin
+        # expressible. Falls back to the unwindowed argmax if nothing positive
+        # sits inside the window, so a valid magnet is never lost to the filter.
         if not pos_rows.empty:
-            pin_strike = float(pos_rows.loc[pos_rows[col].idxmax(), 'strike'])
+            reach = PIN_MAGNET_MAX_SIGMA * daily_em
+            near = pos_rows[(pos_rows['strike'] - spot).abs() <= reach]
+            src = near if not near.empty else pos_rows
+            pin_strike = float(src.loc[src[col].idxmax(), 'strike'])
+            pin_strike_windowed = not near.empty
 
     # 2. Pin anchor: max-pain blended with the gamma magnet. The stronger the
     #    long-gamma regime, the more the gamma strike matters.
@@ -1109,7 +1123,27 @@ def compute_dealer_pin_close(
     gamma_adj = 0.40 * (gamma_strength - 0.5) * 2.0  # -0.40 .. +0.40
     regime_adj = {'choppy': 0.15, 'transitional': 0.0, 'trending': -0.20}.get(regime, 0.0)
     pull = max(0.0, min(0.90, base_pull + gamma_adj + regime_adj))
-    estimate = anchor + pull * (pin_target - anchor)
+
+    # Short gamma is a different mechanism, not a weaker pin. Dealers hedge
+    # pro-cyclically — selling into weakness, buying into strength — so price is
+    # pushed AWAY from spot rather than dragged toward a magnet, and realized
+    # moves routinely exceed the expected move. Driving `pull` toward 0 modelled
+    # that as "no move at all": the estimate landed exactly on the anchor and the
+    # forecast was graded as a directional miss on ~38% of sessions. Project
+    # continuation instead, which is also how the reference auction framework
+    # treats a break — target the next objective in the direction of travel.
+    # Without a usable momentum sign there is nothing to continue, so fall back
+    # to the pin path rather than inventing a direction.
+    pin_mode = 'pin'
+    try:
+        mom = float(momentum_sign) if momentum_sign is not None else 0.0
+    except (TypeError, ValueError):
+        mom = 0.0
+    if gamma_strength <= SHORT_GAMMA_THRESHOLD and mom != 0.0:
+        pin_mode = 'drift'
+        estimate = anchor + (1.0 if mom > 0 else -1.0) * SHORT_GAMMA_DRIFT_EM * daily_em
+    else:
+        estimate = anchor + pull * (pin_target - anchor)
 
     # 4. Bracket by nearby fractal structure + the expected-move envelope.
     #    Strong NEURAL zones and the active VECTORS (Fractal-Exchange-style
@@ -1175,6 +1209,11 @@ def compute_dealer_pin_close(
         'gamma_pin_strike': round(pin_strike, 2) if pin_strike is not None else None,
         'gamma_strength': round(gamma_strength, 2),
         'gamma_regime': 'positive (sticky / pin)' if gamma_strength > 0.5 else 'negative (slippery / drift)',
+        # Which mechanism produced this estimate: 'pin' (dragged toward the
+        # magnet) or 'drift' (short gamma, projected continuation). These are
+        # different models and must be scored separately, not blended.
+        'pin_mode': pin_mode,
+        'magnet_windowed': pin_strike_windowed,
         'anchor_price': round(anchor, 2),
         'anchor_source': anchor_source,
         'pull_fraction': round(pull, 2),
@@ -1415,10 +1454,31 @@ def compute_composite_analysis(
     # 6b. Dealer-pin estimated close — where dealers are incentivized to pin
     #     price into expiry (most OI expires OTM), shaped by fractal structure.
     #     Same session anchor (today's open) so the estimate stops chasing spot.
+    #     Momentum sign feeds the short-gamma drift path only. The overnight gap
+    #     is the freshest directional read at pre-open recording time and is
+    #     exactly what pro-cyclical dealer hedging amplifies; when the tape has
+    #     effectively gapped nowhere it says nothing, so fall back to the recent
+    #     swing. Both silent → no sign → the engine stays on the pin path.
+    momentum_sign = None
+    try:
+        closes = df['Close'].dropna()
+        if len(closes) >= 6:
+            prior_close = float(closes.iloc[-1])
+            gap = spot - prior_close
+            if abs(gap) >= 0.10 * (iv_range.get('daily_expected_move') or 0.0):
+                momentum_sign = 1.0 if gap > 0 else -1.0
+            else:
+                swing = float(closes.iloc[-1]) - float(closes.iloc[-6])
+                if swing != 0:
+                    momentum_sign = 1.0 if swing > 0 else -1.0
+    except (KeyError, IndexError, TypeError, ValueError):
+        momentum_sign = None
+
     pin_close = compute_dealer_pin_close(
         spot=spot, max_pain=max_pain_strike, gex_df=gex_df,
         fractal_levels=fractal_levels, iv_range=iv_range, regime=regime,
         neurals=neurals, vectors=vectors, anchor_price=session_anchor,
+        momentum_sign=momentum_sign,
     )
 
     # 6c. Nearest reaction levels — first defended level above/below spot,

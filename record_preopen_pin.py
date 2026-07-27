@@ -92,8 +92,11 @@ def build_pin_forecast_kwargs(result: dict, *, ticker: str,
         est_close = pin.get("estimated_close")
         pin_target = pin.get("pin_target")
         max_pain = pin.get("max_pain", result.get("max_pain"))
+        # 'pin' (dragged to the magnet) or 'drift' (short gamma, continuation).
+        pin_mode = pin.get("pin_mode", "")
     else:
         est_close, pin_target, max_pain = None, None, result.get("max_pain")
+        pin_mode = ""
 
     # Prefer the gamma regime from the pin engine (positive/negative gamma is the
     # single biggest driver of whether the pin holds); fall back to VIX regime.
@@ -117,6 +120,9 @@ def build_pin_forecast_kwargs(result: dict, *, ticker: str,
         estimated_close=est_close,
         pin_target=pin_target,
         max_pain=max_pain,
+        # Which mechanism produced est_close ('pin' or 'drift') — the scorecard
+        # scores the two apart rather than averaging them.
+        pin_mode=pin_mode,
         # Provenance for data-accuracy auditing: was the pin anchored on a LIVE
         # pre-market quote ('live_override') or a stale settled close
         # ('daily_close'), and which backend served the option chain it was
